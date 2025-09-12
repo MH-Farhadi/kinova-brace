@@ -1,1 +1,1 @@
-# kinova-LLM
+# kinova-isaac
