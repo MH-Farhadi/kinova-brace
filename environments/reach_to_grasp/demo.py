@@ -1,4 +1,6 @@
 import argparse
+import sys
+from pathlib import Path
 from isaaclab.app import AppLauncher
 
 # add argparse arguments
@@ -13,8 +15,13 @@ simulation_app = app_launcher.app
 import torch
 import isaaclab.sim as sim_utils
 
-from config import SceneConfig, CameraConfig, DEFAULT_SCENE, DEFAULT_CAMERA
-from utils import design_scene
+# Ensure package root is available when running as a script
+# ROOT = Path(__file__).resolve().parents[2]
+# if str(ROOT) not in sys.path:
+#     sys.path.append(str(ROOT))
+
+from environments.reach_to_grasp.config import DEFAULT_SCENE, DEFAULT_CAMERA
+from environments.reach_to_grasp.utils import design_scene
 
 
 def run_simulator(sim: sim_utils.SimulationContext, entities: dict, origins: torch.Tensor):
@@ -34,7 +41,7 @@ def run_simulator(sim: sim_utils.SimulationContext, entities: dict, origins: tor
                 joint_pos, joint_vel = robot.data.default_joint_pos.clone(), robot.data.default_joint_vel.clone()
                 robot.write_joint_state_to_sim(joint_pos, joint_vel)
                 robot.reset()
-            print("[INFO]: Resetting robots state...")
+            # print("[INFO]: Resetting robots state...")
         for robot in entities.values():
             joint_pos_target = robot.data.default_joint_pos + torch.randn_like(robot.data.joint_pos) * 0.1
             joint_pos_target = joint_pos_target.clamp_(
@@ -52,7 +59,8 @@ def run_simulator(sim: sim_utils.SimulationContext, entities: dict, origins: tor
 def main():
     sim_cfg = sim_utils.SimulationCfg(device=args_cli.device)
     sim = sim_utils.SimulationContext(sim_cfg)
-    sim.set_camera_view(DEFAULT_CAMERA.eye, DEFAULT_CAMERA.target)
+    if not args_cli.headless:
+        sim.set_camera_view(DEFAULT_CAMERA.eye, DEFAULT_CAMERA.target)
     scene_entities, scene_origins = design_scene(DEFAULT_SCENE)
     scene_origins = torch.tensor(scene_origins, device=sim.device)
     sim.reset()

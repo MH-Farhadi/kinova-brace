@@ -11,7 +11,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.append(str(ROOT))
 
-from controllers.cartesian_velocity_tool import CartesianVelocityJogController, CartesianVelocityJogConfig
+from controllers.cartesian_velocity import CartesianVelocityJogController, CartesianVelocityJogConfig
 
 from controllers.base import InputProvider
 
@@ -34,7 +34,7 @@ class Se3KeyboardInput(InputProvider):
 def run(sim, robot, controller: CartesianVelocityJogController, simulation_app):
     dt = sim.get_physics_dt()
     controller.reset(robot)
-    print("[INFO] Cartesian velocity jog: Use W/S A/D Q/E for +/- X/Y/Z. L to zero.")
+    print("[INFO] Cartesian velocity jog running. In headless mode, commands default to zero.")
     while simulation_app.is_running():
         controller.step(robot, dt)
         sim.step()
@@ -62,7 +62,8 @@ def main():
 
     sim_cfg = sim_utils.SimulationCfg(device=args_cli.device)
     sim = sim_utils.SimulationContext(sim_cfg)
-    sim.set_camera_view(DEFAULT_CAMERA.eye, DEFAULT_CAMERA.target)
+    if not args_cli.headless:
+        sim.set_camera_view(DEFAULT_CAMERA.eye, DEFAULT_CAMERA.target)
 
     # Build scene and fetch robot
     scene_entities, scene_origins = design_scene(DEFAULT_SCENE)
@@ -77,8 +78,6 @@ def main():
     robot.write_root_velocity_to_sim(root_state[:, 7:])
     robot.write_joint_state_to_sim(robot.data.default_joint_pos, robot.data.default_joint_vel)
     robot.reset()
-    ids, names = robot.find_bodies(".*")
-    print("[INFO] Available body names:", names)
 
     # Controller setup
     ctrl_cfg = CartesianVelocityJogConfig(
@@ -88,8 +87,9 @@ def main():
         linear_speed_mps=float(args_cli.speed),
     )
     controller = CartesianVelocityJogController(ctrl_cfg, num_envs=1, device=str(sim.device))
-    keyboard = Se3KeyboardInput(pos_sensitivity_per_step=ctrl_cfg.linear_speed_mps * sim.get_physics_dt())
-    controller.set_input_provider(keyboard)
+    if not args_cli.headless:
+        keyboard = Se3KeyboardInput(pos_sensitivity_per_step=ctrl_cfg.linear_speed_mps * sim.get_physics_dt())
+        controller.set_input_provider(keyboard)
 
     print("[INFO]: Setup complete...")
     run(sim, robot, controller, simulation_app)

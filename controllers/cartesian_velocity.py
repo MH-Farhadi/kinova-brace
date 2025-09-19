@@ -16,6 +16,7 @@ class CartesianVelocityJogConfig(ArmControllerConfig):
 
     linear_speed_mps: float = 0.05
     ik_method: Literal["pinv", "svd", "trans", "dls"] = "dls"
+    hold_orientation: bool = True
 
 
 class CartesianVelocityJogController(ArmController):
@@ -32,6 +33,7 @@ class CartesianVelocityJogController(ArmController):
         self._arm_joint_ids = None
         self._ee_body_id = None
         self._ee_jacobi_idx = None
+        self._ee_quat_hold_b: Optional[torch.Tensor] = None
 
     def reset(self, robot) -> None:
         diff_ik_cfg = DifferentialIKControllerCfg(
@@ -51,6 +53,14 @@ class CartesianVelocityJogController(ArmController):
 
         # Hold current joint positions as position targets
         robot.set_joint_position_target(robot.data.joint_pos)
+
+        # Capture initial EE orientation in base frame to optionally hold during translation
+        root_pose_w = robot.data.root_pose_w
+        ee_pose_w = robot.data.body_pose_w[:, self._ee_body_id]
+        ee_pos_b, ee_quat_b = subtract_frame_transforms(
+            root_pose_w[:, 0:3], root_pose_w[:, 3:7], ee_pose_w[:, 0:3], ee_pose_w[:, 3:7]
+        )
+        self._ee_quat_hold_b = ee_quat_b.clone()
 
     def step(self, robot, dt: float) -> None:
         assert self._diff_ik is not None, "Controller not reset()"
@@ -77,7 +87,13 @@ class CartesianVelocityJogController(ArmController):
         )
 
         # Compute desired joint positions via IK and convert to velocity
-        self._diff_ik.set_command(dx_cmd, ee_pos=ee_pos_b, ee_quat=ee_quat_b)
+        if self.config.hold_orientation and self._ee_quat_hold_b is not None:
+            # Maintain initial EE orientation in base frame, translate by dx
+            pos_des = ee_pos_b + dx_cmd[:, 0:3]
+            self._diff_ik.ee_pos_des[:] = pos_des
+            self._diff_ik.ee_quat_des[:] = self._ee_quat_hold_b
+        else:
+            self._diff_ik.set_command(dx_cmd, ee_pos=ee_pos_b, ee_quat=ee_quat_b)
         q_des = self._diff_ik.compute(ee_pos_b, ee_quat_b, jac, q_arm)
         qdot_arm = (q_des - q_arm) / dt
 

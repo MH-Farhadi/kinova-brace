@@ -1,22 +1,9 @@
 import numpy as np
 import torch
 from dataclasses import replace as dc_replace
-from typing import TYPE_CHECKING
-
 import isaaclab.sim as sim_utils
 from isaaclab.assets import Articulation
-
-try:  # When imported as a package (python -m ...)
-    from .config import BASE_ROBOT_CFG  # type: ignore
-except Exception:  # When run as a script from this folder
-    from config import BASE_ROBOT_CFG  # type: ignore
-
-if TYPE_CHECKING:
-    try:
-        from .config import SceneConfig  # type: ignore
-    except Exception:
-        from config import SceneConfig  # type: ignore
-
+from environments.reach_to_grasp.config import BASE_ROBOT_CFG, SceneConfig
 
 def define_origins(num_origins: int, spacing: float) -> list[list[float]]:
     """Defines the origins of the the scene in a grid layout."""
@@ -55,6 +42,9 @@ def design_scene(scene_cfg: "SceneConfig") -> tuple[dict, list[list[float]]]:
     # -- Robot
     kinova_j2n6_cfg = dc_replace(BASE_ROBOT_CFG, prim_path=scene_cfg.robot_prim_path)
     kinova_j2n6_cfg.init_state.pos = (0.0, 0.0, scene_cfg.robot_base_height)
+    # Optional initial joint configuration (by name or regex) if provided via scene config
+    if getattr(scene_cfg, "robot_default_joint_pos", None):
+        kinova_j2n6_cfg.init_state.joint_pos = scene_cfg.robot_default_joint_pos  # type: ignore[arg-type]
     kinova_j2n6s300 = Articulation(cfg=kinova_j2n6_cfg)
 
     scene_entities = {
