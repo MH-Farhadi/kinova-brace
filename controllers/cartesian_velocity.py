@@ -8,6 +8,7 @@ from isaaclab.controllers import DifferentialIKController, DifferentialIKControl
 from isaaclab.utils.math import subtract_frame_transforms
 
 from controllers.base import ArmController, ArmControllerConfig, InputProvider
+from controllers.safety import WorkspaceBounds, hold_orientation
 
 
 @dataclass
@@ -17,6 +18,7 @@ class CartesianVelocityJogConfig(ArmControllerConfig):
     linear_speed_mps: float = 0.05
     ik_method: Literal["pinv", "svd", "trans", "dls"] = "dls"
     hold_orientation: bool = True
+    # Inherit safety from base; no extra fields
 
 
 class CartesianVelocityJogController(ArmController):
@@ -87,13 +89,14 @@ class CartesianVelocityJogController(ArmController):
         )
 
         # Compute desired joint positions via IK and convert to velocity
-        if self.config.hold_orientation and self._ee_quat_hold_b is not None:
-            # Maintain initial EE orientation in base frame, translate by dx
-            pos_des = ee_pos_b + dx_cmd[:, 0:3]
-            self._diff_ik.ee_pos_des[:] = pos_des
-            self._diff_ik.ee_quat_des[:] = self._ee_quat_hold_b
-        else:
-            self._diff_ik.set_command(dx_cmd, ee_pos=ee_pos_b, ee_quat=ee_quat_b)
+        # Build desired position in base frame and optionally clamp to workspace
+        pos_des = ee_pos_b + dx_cmd[:, 0:3]
+        ws = WorkspaceBounds(self.config.workspace_min, self.config.workspace_max)
+        pos_des = ws.clamp(pos_des, device=self.device)
+
+        quat_des = hold_orientation(ee_quat_b, self._ee_quat_hold_b, self.config.hold_orientation)
+        self._diff_ik.ee_pos_des[:] = pos_des
+        self._diff_ik.ee_quat_des[:] = quat_des
         q_des = self._diff_ik.compute(ee_pos_b, ee_quat_b, jac, q_arm)
         qdot_arm = (q_des - q_arm) / dt
 

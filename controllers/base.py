@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Optional, Protocol
+from typing import Optional, Protocol, Tuple
 
 import torch
 
@@ -26,6 +26,10 @@ class ArmControllerConfig:
     arm_joint_regex: str = "j2n6s300_joint_[1-6]"
     use_relative_mode: bool = True
     device: str = "cuda:0"
+    # Common safety knobs
+    hold_orientation: bool = True
+    workspace_min: Optional[Tuple[float, float, float]] = None
+    workspace_max: Optional[Tuple[float, float, float]] = None
 
 
 class InputProvider(Protocol):
