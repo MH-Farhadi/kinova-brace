@@ -90,10 +90,10 @@ def main():
         use_relative_mode=True,
         linear_speed_mps=float(args_cli.speed),
         # Per-axis workspace bounds in base frame (meters)
-        workspace_min=(0.20, -0.45, 0.82),
-        workspace_max=(0.6, 0.45, 1.28),
+        workspace_min=(0.20, -0.45, 0.01),
+        workspace_max=(0.6, 0.45, 0.35),
         # workspace_min=(0.0, -0.45, 0.82),
-        # workspace_max=(0.6, 0.45, 1.4),
+        # workspace_max=(0.6, 0.45, 0.47),
         log_ee_pos=bool(args_cli.print_ee),
         log_ee_frame=str(args_cli.ee_frame),
         log_every_n_steps=int(args_cli.print_interval),
