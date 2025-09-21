@@ -28,8 +28,12 @@ class ArmControllerConfig:
     device: str = "cuda:0"
     # Common safety knobs
     hold_orientation: bool = True
-    workspace_min: Optional[Tuple[float, float, float]] = None
-    workspace_max: Optional[Tuple[float, float, float]] = None
+    workspace_min: Optional[Tuple[Optional[float], Optional[float], Optional[float]]] = None
+    workspace_max: Optional[Tuple[Optional[float], Optional[float], Optional[float]]] = None
+    # Logging
+    log_ee_pos: bool = False
+    log_ee_frame: str = "world"  # "world" or "base"
+    log_every_n_steps: int = 1
 
 
 class InputProvider(Protocol):

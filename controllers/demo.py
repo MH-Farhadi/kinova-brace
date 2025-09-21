@@ -45,6 +45,10 @@ def main():
     parser = argparse.ArgumentParser(description="Cartesian velocity jog demo using modular controller.")
     parser.add_argument("--ee_link", type=str, default="j2n6s300_end_effector", help="End-effector link name")
     parser.add_argument("--speed", type=float, default=0.20, help="Linear speed (m/s)")
+    # EE logging controls
+    parser.add_argument("--print-ee", action="store_true", help="Print EE XYZ each step")
+    parser.add_argument("--ee-frame", type=str, default="world", choices=["world", "base"], help="Frame for EE logging")
+    parser.add_argument("--print-interval", type=int, default=1, help="Print every N steps")
     AppLauncher.add_app_launcher_args(parser)
     args_cli = parser.parse_args()
 
@@ -85,6 +89,14 @@ def main():
         device=str(sim.device),
         use_relative_mode=True,
         linear_speed_mps=float(args_cli.speed),
+        # Per-axis workspace bounds in base frame (meters)
+        workspace_min=(0.20, -0.45, 0.82),
+        workspace_max=(0.6, 0.45, 1.28),
+        # workspace_min=(0.0, -0.45, 0.82),
+        # workspace_max=(0.6, 0.45, 1.4),
+        log_ee_pos=bool(args_cli.print_ee),
+        log_ee_frame=str(args_cli.ee_frame),
+        log_every_n_steps=int(args_cli.print_interval),
     )
     controller = CartesianVelocityJogController(ctrl_cfg, num_envs=1, device=str(sim.device))
     if not args_cli.headless:

@@ -9,6 +9,7 @@ from isaaclab.utils.math import subtract_frame_transforms
 
 from controllers.base import ArmController, ArmControllerConfig, InputProvider
 from controllers.safety import WorkspaceBounds, hold_orientation
+import numpy as np
 
 
 @dataclass
@@ -36,6 +37,7 @@ class CartesianVelocityJogController(ArmController):
         self._ee_body_id = None
         self._ee_jacobi_idx = None
         self._ee_quat_hold_b: Optional[torch.Tensor] = None
+        self._step_count = 0
 
     def reset(self, robot) -> None:
         diff_ik_cfg = DifferentialIKControllerCfg(
@@ -108,6 +110,16 @@ class CartesianVelocityJogController(ArmController):
         # Gravity compensation
         gravity = robot.root_physx_view.get_gravity_compensation_forces()
         robot.set_joint_effort_target(gravity)
+
+        # Optional real-time EE position logging
+        if self.config.log_ee_pos:
+            frame = getattr(self.config, "log_ee_frame", "world")
+            every = max(1, int(getattr(self.config, "log_every_n_steps", 1)))
+            if (self._step_count % every) == 0:
+                pos = ee_pose_w if frame == "world" else ee_pos_b
+                pos_np = pos.detach().to("cpu").numpy().tolist()
+                print(f"[EE POS] frame={frame} pos={np.round(pos_np, 2)}")
+        self._step_count += 1
 
         # Write to sim
         robot.write_data_to_sim()
