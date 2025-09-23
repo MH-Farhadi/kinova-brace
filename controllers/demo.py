@@ -17,11 +17,15 @@ from controllers.base import InputProvider
 
 
 class Se3KeyboardInput(InputProvider):
-    def __init__(self, pos_sensitivity_per_step: float) -> None:
+    def __init__(self, pos_sensitivity_per_step: float, rot_sensitivity_rad_per_step: float) -> None:
         from isaaclab.devices import Se3Keyboard, Se3KeyboardCfg
 
         self._kb = Se3Keyboard(
-            Se3KeyboardCfg(pos_sensitivity=pos_sensitivity_per_step, rot_sensitivity=0.0, gripper_term=False)
+            Se3KeyboardCfg(
+                pos_sensitivity=pos_sensitivity_per_step,
+                rot_sensitivity=rot_sensitivity_rad_per_step,
+                gripper_term=False,
+            )
         )
 
     def reset(self) -> None:
@@ -45,10 +49,13 @@ def main():
     parser = argparse.ArgumentParser(description="Cartesian velocity jog demo using modular controller.")
     parser.add_argument("--ee_link", type=str, default="j2n6s300_end_effector", help="End-effector link name")
     parser.add_argument("--speed", type=float, default=0.20, help="Linear speed (m/s)")
+    parser.add_argument("--rot-speed", type=float, default=0.5, help="Angular speed (rad/s)")
     # EE logging controls
     parser.add_argument("--print-ee", action="store_true", help="Print EE XYZ each step")
     parser.add_argument("--ee-frame", type=str, default="world", choices=["world", "base"], help="Frame for EE logging")
     parser.add_argument("--print-interval", type=int, default=1, help="Print every N steps")
+    # Mode handling
+    parser.add_argument("--start-mode", type=str, default="translate", choices=["translate", "rotate"], help="Initial mode")
     AppLauncher.add_app_launcher_args(parser)
     args_cli = parser.parse_args()
 
@@ -92,18 +99,38 @@ def main():
         # Per-axis workspace bounds in base frame (meters)
         workspace_min=(0.20, -0.45, 0.01),
         workspace_max=(0.6, 0.45, 0.35),
-        # workspace_min=(0.0, -0.45, 0.82),
-        # workspace_max=(0.6, 0.45, 0.47),
         log_ee_pos=bool(args_cli.print_ee),
         log_ee_frame=str(args_cli.ee_frame),
         log_every_n_steps=int(args_cli.print_interval),
     )
     controller = CartesianVelocityJogController(ctrl_cfg, num_envs=1, device=str(sim.device))
+    controller.set_mode(str(args_cli.start_mode))
+
     if not args_cli.headless:
-        keyboard = Se3KeyboardInput(pos_sensitivity_per_step=ctrl_cfg.linear_speed_mps * sim.get_physics_dt())
+        keyboard = Se3KeyboardInput(
+            pos_sensitivity_per_step=ctrl_cfg.linear_speed_mps * sim.get_physics_dt(),
+            rot_sensitivity_rad_per_step=float(args_cli.rot_speed) * sim.get_physics_dt(),
+        )
         controller.set_input_provider(keyboard)
 
-    print("[INFO]: Setup complete...")
+        # Mode switching via Se3Keyboard callbacks
+        def _to_translate():
+            print("[KB] translate mode request")
+            controller.set_mode("translate")
+
+        def _to_rotate():
+            print("[KB] rotate mode request")
+            controller.set_mode("rotate")
+
+        try:
+            for k in ["f", "F", "1"]:
+                keyboard._kb.add_callback(k, _to_translate)  # type: ignore[attr-defined]
+            for k in ["r", "R", "2"]:
+                keyboard._kb.add_callback(k, _to_rotate)     # type: ignore[attr-defined]
+        except Exception:
+            print("[INFO]: Failed to add keyboard callbacks")
+
+    print("[INFO]: Setup complete... (Mode keys: F/f=translate, R/r=rotate; also 1/2). Start mode=", args_cli.start_mode)
     run(sim, robot, controller, simulation_app)
     simulation_app.close()
 

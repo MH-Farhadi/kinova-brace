@@ -5,11 +5,10 @@ from dataclasses import dataclass
 from typing import Optional, Literal
 
 from isaaclab.controllers import DifferentialIKController, DifferentialIKControllerCfg
-from isaaclab.utils.math import subtract_frame_transforms
+from isaaclab.utils.math import subtract_frame_transforms, quat_box_plus
 
 from controllers.base import ArmController, ArmControllerConfig, InputProvider
 from controllers.safety import WorkspaceBounds, hold_orientation
-import numpy as np
 
 
 @dataclass
@@ -26,7 +25,8 @@ class CartesianVelocityJogController(ArmController):
     """Controller that maps a 3D Cartesian velocity command to joint velocity via Diff-IK.
 
     The input provider is expected to return a 7D tensor per step: [dx, dy, dz, rx, ry, rz, g]
-    Only the first three entries are used to construct a translation-only 6D twist.
+    Translation mode uses only [dx, dy, dz] and holds orientation.
+    Rotation mode uses only [rx, ry, rz] (rotation vector) and holds position.
     """
 
     def __init__(self, config: CartesianVelocityJogConfig, num_envs: int = 1, device: Optional[str] = None) -> None:
@@ -38,6 +38,14 @@ class CartesianVelocityJogController(ArmController):
         self._ee_jacobi_idx = None
         self._ee_quat_hold_b: Optional[torch.Tensor] = None
         self._step_count = 0
+        self._mode: Literal["translate", "rotate"] = "translate"
+
+    def set_mode(self, mode: Literal["translate", "rotate"]) -> None:
+        if mode not in ("translate", "rotate"):
+            raise ValueError("mode must be 'translate' or 'rotate'")
+        if self._mode != mode:
+            self._mode = mode
+            print(f"[CTRL] Mode set to: {self._mode}")
 
     def reset(self, robot) -> None:
         diff_ik_cfg = DifferentialIKControllerCfg(
@@ -71,13 +79,21 @@ class CartesianVelocityJogController(ArmController):
         assert self._arm_joint_ids is not None, "Controller not reset()"
         assert self._ee_body_id is not None, "Controller not reset()"
 
-        # Read input provider
+        # Read input provider and robustly shape it to (N, D)
         if self._input_provider is None:
-            dx_cmd = torch.zeros(self.num_envs, 6, device=self.device)
+            cmd = torch.zeros(1, 6, device=self.device)
         else:
-            cmd7 = self._input_provider.advance()
-            dx_cmd = torch.zeros(self.num_envs, 6, device=self.device)
-            dx_cmd[:, 0:3] = cmd7[..., 0:3]
+            cmd = self._input_provider.advance()
+            if cmd.ndim == 1:
+                cmd = cmd.view(1, -1)
+        if cmd.shape[-1] < 6:
+            pad = torch.zeros(cmd.shape[0], 6 - cmd.shape[-1], device=cmd.device, dtype=cmd.dtype)
+            cmd = torch.cat([cmd, pad], dim=-1)
+        if str(cmd.device) != str(torch.device(self.device)):
+            cmd = cmd.to(self.device)
+
+        dpos = cmd[..., 0:3]
+        drot = cmd[..., 3:6]
 
         # State
         jac = robot.root_physx_view.get_jacobians()[:, self._ee_jacobi_idx, :, self._arm_joint_ids]
@@ -90,13 +106,16 @@ class CartesianVelocityJogController(ArmController):
             root_pose_w[:, 0:3], root_pose_w[:, 3:7], ee_pose_w[:, 0:3], ee_pose_w[:, 3:7]
         )
 
-        # Compute desired joint positions via IK and convert to velocity
-        # Build desired position in base frame and optionally clamp to workspace
-        pos_des = ee_pos_b + dx_cmd[:, 0:3]
+        # Build desired pose based on mode
         ws = WorkspaceBounds(self.config.workspace_min, self.config.workspace_max)
-        pos_des = ws.clamp(pos_des, device=self.device)
+        if self._mode == "translate":
+            pos_des = ws.clamp(ee_pos_b + dpos, device=self.device)
+            quat_des = hold_orientation(ee_quat_b, self._ee_quat_hold_b, True)
+        else:
+            pos_des = ws.clamp(ee_pos_b, device=self.device)
+            quat_des = quat_box_plus(ee_quat_b, drot)
 
-        quat_des = hold_orientation(ee_quat_b, self._ee_quat_hold_b, self.config.hold_orientation)
+        # Feed IK
         self._diff_ik.ee_pos_des[:] = pos_des
         self._diff_ik.ee_quat_des[:] = quat_des
         q_des = self._diff_ik.compute(ee_pos_b, ee_quat_b, jac, q_arm)
@@ -112,13 +131,16 @@ class CartesianVelocityJogController(ArmController):
         robot.set_joint_effort_target(gravity)
 
         # Optional real-time EE position logging
-        if self.config.log_ee_pos:
+        if getattr(self.config, "log_ee_pos", False):
             frame = getattr(self.config, "log_ee_frame", "world")
             every = max(1, int(getattr(self.config, "log_every_n_steps", 1)))
             if (self._step_count % every) == 0:
-                pos = ee_pose_w if frame == "world" else ee_pos_b
+                if frame == "world":
+                    pos = ee_pose_w[:, 0:3]
+                else:
+                    pos = ee_pos_b
                 pos_np = pos.detach().to("cpu").numpy().tolist()
-                print(f"[EE POS] frame={frame} pos={np.round(pos_np, 2)}")
+                print(f"[EE] frame={frame} xyz(m)={pos_np} mode={self._mode}")
         self._step_count += 1
 
         # Write to sim
