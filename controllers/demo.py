@@ -24,7 +24,7 @@ class Se3KeyboardInput(InputProvider):
             Se3KeyboardCfg(
                 pos_sensitivity=pos_sensitivity_per_step,
                 rot_sensitivity=rot_sensitivity_rad_per_step,
-                gripper_term=False,
+                gripper_term=True,
             )
         )
 
@@ -55,7 +55,7 @@ def main():
     parser.add_argument("--ee-frame", type=str, default="world", choices=["world", "base"], help="Frame for EE logging")
     parser.add_argument("--print-interval", type=int, default=1, help="Print every N steps")
     # Mode handling
-    parser.add_argument("--start-mode", type=str, default="translate", choices=["translate", "rotate"], help="Initial mode")
+    parser.add_argument("--start-mode", type=str, default="translate", choices=["translate", "rotate", "gripper"], help="Initial mode")
     AppLauncher.add_app_launcher_args(parser)
     args_cli = parser.parse_args()
 
@@ -122,15 +122,21 @@ def main():
             print("[KB] rotate mode request")
             controller.set_mode("rotate")
 
+        def _to_gripper():
+            print("[KB] gripper mode request")
+            controller.set_mode("gripper")
+
         try:
             for k in ["f", "F", "1"]:
                 keyboard._kb.add_callback(k, _to_translate)  # type: ignore[attr-defined]
             for k in ["r", "R", "2"]:
                 keyboard._kb.add_callback(k, _to_rotate)     # type: ignore[attr-defined]
+            for k in ["g", "G", "3"]:
+                keyboard._kb.add_callback(k, _to_gripper)    # type: ignore[attr-defined]
         except Exception:
             print("[INFO]: Failed to add keyboard callbacks")
 
-    print("[INFO]: Setup complete... (Mode keys: F/f=translate, R/r=rotate; also 1/2). Start mode=", args_cli.start_mode)
+    print("[INFO]: Setup complete... (Mode keys: F/f=translate, R/r=rotate, G/g=gripper; also 1/2/3). Start mode=", args_cli.start_mode)
     run(sim, robot, controller, simulation_app)
     simulation_app.close()
 
