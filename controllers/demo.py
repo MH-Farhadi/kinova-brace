@@ -11,28 +11,13 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.append(str(ROOT))
 
-from controllers.cartesian_velocity import CartesianVelocityJogController, CartesianVelocityJogConfig
-
-from controllers.base import InputProvider
-
-
-class Se3KeyboardInput(InputProvider):
-    def __init__(self, pos_sensitivity_per_step: float, rot_sensitivity_rad_per_step: float) -> None:
-        from isaaclab.devices import Se3Keyboard, Se3KeyboardCfg
-
-        self._kb = Se3Keyboard(
-            Se3KeyboardCfg(
-                pos_sensitivity=pos_sensitivity_per_step,
-                rot_sensitivity=rot_sensitivity_rad_per_step,
-                gripper_term=True,
-            )
-        )
-
-    def reset(self) -> None:
-        pass
-
-    def advance(self):
-        return self._kb.advance()
+# Import from our modular controller library
+from controllers import (
+    CartesianVelocityJogConfig,
+    CartesianVelocityJogController,
+    Se3KeyboardInput,
+    ModeManager,
+)
 
 
 def run(sim, robot, controller: CartesianVelocityJogController, simulation_app):
@@ -104,7 +89,11 @@ def main():
         log_every_n_steps=int(args_cli.print_interval),
     )
     controller = CartesianVelocityJogController(ctrl_cfg, num_envs=1, device=str(sim.device))
-    controller.set_mode(str(args_cli.start_mode))
+    
+    # Mode management setup
+    mode_manager = ModeManager(initial_mode=str(args_cli.start_mode))
+    mode_manager.set_mode_change_callback(lambda mode: controller.set_mode(str(mode)))
+    controller.set_mode(str(args_cli.start_mode))  # Set initial mode
 
     if not args_cli.headless:
         keyboard = Se3KeyboardInput(
@@ -113,30 +102,11 @@ def main():
         )
         controller.set_input_provider(keyboard)
 
-        # Mode switching via Se3Keyboard callbacks
-        def _to_translate():
-            print("[KB] translate mode request")
-            controller.set_mode("translate")
+        # Setup mode switching callbacks
+        translate_fn, rotate_fn, gripper_fn = mode_manager.get_mode_callbacks()
+        keyboard.add_mode_callbacks(translate_fn, rotate_fn, gripper_fn)
 
-        def _to_rotate():
-            print("[KB] rotate mode request")
-            controller.set_mode("rotate")
-
-        def _to_gripper():
-            print("[KB] gripper mode request")
-            controller.set_mode("gripper")
-
-        try:
-            for k in ["f", "F", "1"]:
-                keyboard._kb.add_callback(k, _to_translate)  # type: ignore[attr-defined]
-            for k in ["r", "R", "2"]:
-                keyboard._kb.add_callback(k, _to_rotate)     # type: ignore[attr-defined]
-            for k in ["g", "G", "3"]:
-                keyboard._kb.add_callback(k, _to_gripper)    # type: ignore[attr-defined]
-        except Exception:
-            print("[INFO]: Failed to add keyboard callbacks")
-
-    print("[INFO]: Setup complete... (Mode keys: F/f=translate, R/r=rotate, G/g=gripper; also 1/2/3). Start mode=", args_cli.start_mode)
+    print("[INFO]: Setup complete... (Mode keys: F/f/1=translate, R/r/2=rotate, G/g/3=gripper). Start mode=", args_cli.start_mode)
     run(sim, robot, controller, simulation_app)
     simulation_app.close()
 

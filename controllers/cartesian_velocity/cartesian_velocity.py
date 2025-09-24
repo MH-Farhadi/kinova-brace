@@ -1,15 +1,16 @@
+"""Cartesian velocity jogging controller implementation."""
+
 from __future__ import annotations
 
 import torch
-from dataclasses import dataclass
 from typing import Optional, Literal
 
 from isaaclab.controllers import DifferentialIKController, DifferentialIKControllerCfg
 from isaaclab.utils.math import subtract_frame_transforms, quat_box_plus
 
-from controllers.base import ArmController, ArmControllerConfig, InputProvider
-from controllers.safety import WorkspaceBounds, hold_orientation
-
+from ..base import ArmControllerConfig, ArmController, InputProvider
+from ..safety import WorkspaceBounds, hold_orientation
+from dataclasses import dataclass
 
 @dataclass
 class CartesianVelocityJogConfig(ArmControllerConfig):
@@ -21,7 +22,7 @@ class CartesianVelocityJogConfig(ArmControllerConfig):
     # Gripper settings
     gripper_joint_regex: str = ".*_joint_finger_.*|.*_joint_finger_tip_.*"
     gripper_open_pos: float = 0.2
-    gripper_close_pos: float = 1.2
+    gripper_close_pos: float = 1.2 
 
 
 class CartesianVelocityJogController(ArmController):
@@ -175,6 +176,4 @@ class CartesianVelocityJogController(ArmController):
         self._step_count += 1
 
         # Write to sim
-        robot.write_data_to_sim()
-
-
+        robot.write_data_to_sim() 
