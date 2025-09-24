@@ -8,7 +8,7 @@ from typing import Optional, Literal
 from isaaclab.controllers import DifferentialIKController, DifferentialIKControllerCfg
 from isaaclab.utils.math import subtract_frame_transforms, quat_box_plus
 
-from ..base import ArmControllerConfig, ArmController, InputProvider
+from ..base import ArmControllerConfig, ArmController
 from ..safety import WorkspaceBounds, hold_orientation
 from dataclasses import dataclass
 
@@ -45,6 +45,7 @@ class CartesianVelocityJogController(ArmController):
         self._ee_quat_hold_b: Optional[torch.Tensor] = None
         self._step_count = 0
         self._mode: Literal["translate", "rotate", "gripper"] = "translate"
+        self._refresh_hold_ori_on_translate: bool = False
 
     def set_mode(self, mode: Literal["translate", "rotate", "gripper"]) -> None:
         if mode not in ("translate", "rotate", "gripper"):
@@ -52,6 +53,9 @@ class CartesianVelocityJogController(ArmController):
         if self._mode != mode:
             self._mode = mode
             print(f"[CTRL] Mode set to: {self._mode}")
+            if mode == "translate":
+                # Refresh the orientation to hold the current orientation when returning to translate
+                self._refresh_hold_ori_on_translate = True
 
     def reset(self, robot) -> None:
         diff_ik_cfg = DifferentialIKControllerCfg(
@@ -118,11 +122,16 @@ class CartesianVelocityJogController(ArmController):
             root_pose_w[:, 0:3], root_pose_w[:, 3:7], ee_pose_w[:, 0:3], ee_pose_w[:, 3:7]
         )
 
+        # If returning to translate mode, refresh the held orientation to current orientation
+        if self._mode == "translate" and (self._ee_quat_hold_b is None or self._refresh_hold_ori_on_translate):
+            self._ee_quat_hold_b = ee_quat_b.clone()
+            self._refresh_hold_ori_on_translate = False
+
         # Build desired pose based on mode
         ws = WorkspaceBounds(self.config.workspace_min, self.config.workspace_max)
         if self._mode == "translate":
             pos_des = ws.clamp(ee_pos_b + dpos, device=self.device)
-            quat_des = hold_orientation(ee_quat_b, self._ee_quat_hold_b, True)
+            quat_des = hold_orientation(ee_quat_b, self._ee_quat_hold_b, self.config.hold_orientation)
         elif self._mode == "rotate":
             pos_des = ws.clamp(ee_pos_b, device=self.device)
             quat_des = quat_box_plus(ee_quat_b, drot)

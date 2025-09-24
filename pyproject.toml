@@ -1,0 +1,17 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "kinova-isaac"
+version = "0.0.0"
+description = "Kinova Isaac demos, controllers, and environments"
+readme = "README.md"
+requires-python = ">=3.11"
+
+[tool.setuptools]
+packages = [
+  "controllers",
+  "environments",
+]
+include-package-data = true 

@@ -1,6 +1,4 @@
 import argparse
-import sys
-from pathlib import Path
 from isaaclab.app import AppLauncher
 
 # add argparse arguments
@@ -14,11 +12,6 @@ simulation_app = app_launcher.app
 
 import torch
 import isaaclab.sim as sim_utils
-
-# Ensure package root is available when running as a script
-# ROOT = Path(__file__).resolve().parents[2]
-# if str(ROOT) not in sys.path:
-#     sys.path.append(str(ROOT))
 
 from environments.reach_to_grasp.config import DEFAULT_SCENE, DEFAULT_CAMERA
 from environments.reach_to_grasp.utils import design_scene
