@@ -11,6 +11,7 @@ from isaaclab.utils.math import subtract_frame_transforms, quat_box_plus
 from ..base import ArmControllerConfig, ArmController
 from ..safety import WorkspaceBounds, hold_orientation
 from ..safety import should_block_rotation
+from ..safety import project_rotation_toward_quat
 from dataclasses import dataclass
 
 @dataclass
@@ -47,6 +48,7 @@ class CartesianVelocityJogController(ArmController):
         self._ee_body_id = None
         self._ee_jacobi_idx = None
         self._ee_quat_hold_b: Optional[torch.Tensor] = None
+        self._ee_quat_last_safe_b: Optional[torch.Tensor] = None
         self._step_count = 0
         self._mode: Literal["translate", "rotate", "gripper"] = "translate"
         self._refresh_hold_ori_on_translate: bool = False
@@ -89,6 +91,7 @@ class CartesianVelocityJogController(ArmController):
             root_pose_w[:, 0:3], root_pose_w[:, 3:7], ee_pose_w[:, 0:3], ee_pose_w[:, 3:7]
         )
         self._ee_quat_hold_b = ee_quat_b.clone()
+        self._ee_quat_last_safe_b = ee_quat_b.clone()
 
     def step(self, robot, dt: float) -> None:
         assert self._diff_ik is not None, "Controller not reset()"
@@ -133,6 +136,8 @@ class CartesianVelocityJogController(ArmController):
         if self._mode == "translate" and (self._ee_quat_hold_b is None or self._refresh_hold_ori_on_translate):
             self._ee_quat_hold_b = ee_quat_b.clone()
             self._refresh_hold_ori_on_translate = False
+            # update last safe orientation as well
+            self._ee_quat_last_safe_b = ee_quat_b.clone()
 
         # Build desired pose based on mode
         ws = WorkspaceBounds(self.config.workspace_min, self.config.workspace_max)
@@ -150,11 +155,25 @@ class CartesianVelocityJogController(ArmController):
                 joint_limit_margin=self.config.joint_limit_margin_rad,
             )
             pos_des = ws.clamp(ee_pos_b, device=self.device)
-            quat_des = torch.where(
-                block.view(-1, 1).expand_as(ee_quat_b),
-                ee_quat_b,  # hold current orientation (no further rotation)
-                quat_box_plus(ee_quat_b, drot),
-            )
+            if block.any():
+                # allow only component that moves back toward last safe orientation
+                if self._ee_quat_last_safe_b is None:
+                    self._ee_quat_last_safe_b = ee_quat_b.clone()
+                drot_safe = project_rotation_toward_quat(
+                    current_quat=ee_quat_b,
+                    target_quat=self._ee_quat_last_safe_b,
+                    drot=drot,
+                )
+                quat_next = quat_box_plus(ee_quat_b, drot_safe)
+                quat_des = torch.where(
+                    block.view(-1, 1).expand_as(ee_quat_b),
+                    quat_next,
+                    quat_box_plus(ee_quat_b, drot),
+                )
+            else:
+                quat_des = quat_box_plus(ee_quat_b, drot)
+                # update last safe orientation when not blocked
+                self._ee_quat_last_safe_b = quat_des.clone()
         else:  # gripper
             pos_des = ws.clamp(ee_pos_b, device=self.device)
             quat_des = ee_quat_b
