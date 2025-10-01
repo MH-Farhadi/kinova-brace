@@ -10,6 +10,7 @@ from isaaclab.utils.math import subtract_frame_transforms, quat_box_plus
 
 from ..base import ArmControllerConfig, ArmController
 from ..safety import WorkspaceBounds, hold_orientation
+from ..safety import should_block_rotation
 from dataclasses import dataclass
 
 @dataclass
@@ -23,6 +24,9 @@ class CartesianVelocityJogConfig(ArmControllerConfig):
     gripper_joint_regex: str = ".*_joint_finger_.*|.*_joint_finger_tip_.*"
     gripper_open_pos: float = 0.2
     gripper_close_pos: float = 1.2 
+    # Safety thresholds (optional). Set to None to disable a check.
+    min_sigma_thresh: Optional[float] = 0.02  # block rotation if sigma_min < threshold
+    joint_limit_margin_rad: Optional[float] = 0.10  # block rotation if any joint is within margin of limits
 
 
 class CartesianVelocityJogController(ArmController):
@@ -116,6 +120,9 @@ class CartesianVelocityJogController(ArmController):
         ee_pose_w = robot.data.body_pose_w[:, self._ee_body_id]
         root_pose_w = robot.data.root_pose_w
         q_arm = robot.data.joint_pos[:, self._arm_joint_ids]
+        arm_limits = robot.data.soft_joint_pos_limits[:, self._arm_joint_ids, :]  # (N, dof, 2)
+        q_lower = arm_limits[..., 0]
+        q_upper = arm_limits[..., 1]
 
         # Relative pose frame
         ee_pos_b, ee_quat_b = subtract_frame_transforms(
@@ -133,8 +140,21 @@ class CartesianVelocityJogController(ArmController):
             pos_des = ws.clamp(ee_pos_b + dpos, device=self.device)
             quat_des = hold_orientation(ee_quat_b, self._ee_quat_hold_b, self.config.hold_orientation)
         elif self._mode == "rotate":
+            # Gate rotation if the configuration is unsafe
+            block = should_block_rotation(
+                jacobian_b=jac,
+                joint_pos=q_arm,
+                lower=q_lower,
+                upper=q_upper,
+                min_sigma_thresh=self.config.min_sigma_thresh,
+                joint_limit_margin=self.config.joint_limit_margin_rad,
+            )
             pos_des = ws.clamp(ee_pos_b, device=self.device)
-            quat_des = quat_box_plus(ee_quat_b, drot)
+            quat_des = torch.where(
+                block.view(-1, 1).expand_as(ee_quat_b),
+                ee_quat_b,  # hold current orientation (no further rotation)
+                quat_box_plus(ee_quat_b, drot),
+            )
         else:  # gripper
             pos_des = ws.clamp(ee_pos_b, device=self.device)
             quat_des = ee_quat_b
