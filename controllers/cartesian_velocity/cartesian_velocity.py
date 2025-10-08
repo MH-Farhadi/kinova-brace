@@ -3,14 +3,14 @@
 from __future__ import annotations
 
 import torch
-from typing import Optional, Literal
+from typing import Optional, Literal, Tuple
 
 from isaaclab.controllers import DifferentialIKController, DifferentialIKControllerCfg
 from isaaclab.utils.math import subtract_frame_transforms, quat_box_plus, quat_apply
 
 from ..base import ArmControllerConfig, ArmController
-from ..safety import WorkspaceBounds, hold_orientation, project_twist_away_from_low_sigma, clamp_qdot_near_limits, smallest_singular_value, project_rotation_toward_quat
-from dataclasses import dataclass
+from ..safety import ArmSafetyCfg, ArmSafety
+from dataclasses import dataclass, field, replace
 
 @dataclass
 class CartesianVelocityJogConfig(ArmControllerConfig):
@@ -23,9 +23,21 @@ class CartesianVelocityJogConfig(ArmControllerConfig):
     gripper_joint_regex: str = ".*_joint_finger_.*|.*_joint_finger_tip_.*"
     gripper_open_pos: float = 0.2
     gripper_close_pos: float = 1.2 
-    # Safety thresholds (optional). Set to None to disable a check.
-    min_sigma_thresh: Optional[float] = 0.005  # block rotation if sigma_min < threshold
-    joint_limit_margin_rad: Optional[float] = 0.10  # block rotation if any joint is within margin of limits
+    # Safety config (legacy thresholds moved here)
+    safety_cfg: ArmSafetyCfg = field(default_factory=lambda: ArmSafetyCfg(
+        min_sigma_thresh=0.005,
+        joint_limit_margin_rad=0.10,
+    ))
+    # Legacy workspace bounds (now part of safety_cfg, but kept for backward compat)
+    workspace_min: Optional[Tuple[float, float, float]] = field(default=(None, None, None))
+    workspace_max: Optional[Tuple[float, float, float]] = field(default=(None, None, None))
+
+    def __post_init__(self):
+        # Migrate legacy bounds to safety_cfg if not set
+        if self.safety_cfg.workspace_min is None:
+            self.safety_cfg = replace(self.safety_cfg, workspace_min=self.workspace_min)
+        if self.safety_cfg.workspace_max is None:
+            self.safety_cfg = replace(self.safety_cfg, workspace_max=self.workspace_max)
 
 
 class CartesianVelocityJogController(ArmController):
@@ -40,6 +52,7 @@ class CartesianVelocityJogController(ArmController):
     def __init__(self, config: CartesianVelocityJogConfig, num_envs: int = 1, device: Optional[str] = None) -> None:
         super().__init__(config, num_envs=num_envs, device=device)
         self.config: CartesianVelocityJogConfig
+        self.safety = ArmSafety(self.config.safety_cfg, num_envs, device)
         self._diff_ik: Optional[DifferentialIKController] = None
         self._arm_joint_ids = None
         self._gripper_joint_ids = None
@@ -141,35 +154,28 @@ class CartesianVelocityJogController(ArmController):
             self._ee_quat_last_safe_b = ee_quat_b.clone()
 
         # Build desired pose based on mode
-        ws = WorkspaceBounds(self.config.workspace_min, self.config.workspace_max)
         # Compute generic 6D twist and project away from low-sigma directions
         twist = torch.cat([dpos, drot], dim=-1)  # (N,6)
-        twist_safe = project_twist_away_from_low_sigma(
-            jacobian_b=jac,
-            twist_b=twist,
-            min_sigma_thresh=self.config.min_sigma_thresh,
-        )
+        twist_safe = self.safety.project_twist_away_from_low_sigma(jac, twist)
         dpos_safe = twist_safe[..., 0:3]
         drot_safe = twist_safe[..., 3:6]
 
         if self._mode == "rotate":
-            if self.config.min_sigma_thresh is not None:
-                sigma_min = smallest_singular_value(jac)
-                block_sigma = sigma_min < self.config.min_sigma_thresh
+            if self.config.safety_cfg.min_sigma_thresh is not None:
+                sigma_min = self.safety.smallest_singular_value(jac)
+                block_sigma = sigma_min < self.config.safety_cfg.min_sigma_thresh
                 target_quat = self._ee_quat_last_safe_b if self._ee_quat_last_safe_b is not None else ee_quat_b
-                projected_drot = project_rotation_toward_quat(ee_quat_b, target_quat, drot_safe)
+                projected_drot = self.safety.project_rotation_toward_quat(ee_quat_b, target_quat, drot_safe)
                 drot_safe = torch.where(block_sigma.unsqueeze(-1), projected_drot, drot_safe)
-
-        if self._mode == "translate":
-            pos_des = ws.clamp(ee_pos_b + dpos_safe, device=self.device)
-            quat_des = hold_orientation(ee_quat_b, self._ee_quat_hold_b, self.config.hold_orientation)
-        elif self._mode == "rotate":
-            pos_des = ws.clamp(ee_pos_b, device=self.device)
+            pos_des = self.safety.clamp_position(ee_pos_b)
             quat_des = quat_box_plus(ee_quat_b, drot_safe)
             # update last safe orientation for potential external consumers
             self._ee_quat_last_safe_b = quat_des.clone()
+        elif self._mode == "translate":
+            pos_des = self.safety.clamp_position(ee_pos_b + dpos_safe)
+            quat_des = self.safety.hold_orientation(ee_quat_b, self._ee_quat_hold_b, self.config.hold_orientation)
         else:  # gripper
-            pos_des = ws.clamp(ee_pos_b, device=self.device)
+            pos_des = self.safety.clamp_position(ee_pos_b)
             quat_des = ee_quat_b
 
         # Feed IK
@@ -178,13 +184,7 @@ class CartesianVelocityJogController(ArmController):
         q_des = self._diff_ik.compute(ee_pos_b, ee_quat_b, jac, q_arm)
         qdot_arm = (q_des - q_arm) / dt
         # Clamp joint velocities that would push further into nearby joint limits
-        qdot_arm = clamp_qdot_near_limits(
-            qdot=qdot_arm,
-            q=q_arm,
-            lower=q_lower,
-            upper=q_upper,
-            margin=self.config.joint_limit_margin_rad,
-        )
+        qdot_arm = self.safety.clamp_qdot_near_limits(qdot_arm, q_arm, q_lower, q_upper)
 
         # Hold all joints at current position target, zero velocity for non-arm joints
         robot.set_joint_position_target(robot.data.joint_pos)

@@ -11,7 +11,6 @@ from .modes import ControlMode, ModeManager
 
 # Base classes and utilities
 from .base import ArmController, ArmControllerConfig, InputProvider
-from .safety import WorkspaceBounds, hold_orientation
 
 __all__ = [
     # Controllers
@@ -26,7 +25,5 @@ __all__ = [
     "ArmController", 
     "ArmControllerConfig",
     "InputProvider",
-    # Safety
-    "WorkspaceBounds",
-    "hold_orientation",
+    # Removed safety items
 ]
