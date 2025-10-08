@@ -6,10 +6,10 @@ import torch
 from typing import Optional, Literal
 
 from isaaclab.controllers import DifferentialIKController, DifferentialIKControllerCfg
-from isaaclab.utils.math import subtract_frame_transforms, quat_box_plus
+from isaaclab.utils.math import subtract_frame_transforms, quat_box_plus, quat_apply
 
 from ..base import ArmControllerConfig, ArmController
-from ..safety import WorkspaceBounds, hold_orientation, project_twist_away_from_low_sigma, clamp_qdot_near_limits, should_block_rotation
+from ..safety import WorkspaceBounds, hold_orientation, project_twist_away_from_low_sigma, clamp_qdot_near_limits, smallest_singular_value, project_rotation_toward_quat
 from dataclasses import dataclass
 
 @dataclass
@@ -130,6 +130,9 @@ class CartesianVelocityJogController(ArmController):
             root_pose_w[:, 0:3], root_pose_w[:, 3:7], ee_pose_w[:, 0:3], ee_pose_w[:, 3:7]
         )
 
+        if self._mode == "rotate":
+            drot = quat_apply(ee_quat_b, drot)
+
         # If returning to translate mode, refresh the held orientation to current orientation
         if self._mode == "translate" and (self._ee_quat_hold_b is None or self._refresh_hold_ori_on_translate):
             self._ee_quat_hold_b = ee_quat_b.clone()
@@ -150,15 +153,12 @@ class CartesianVelocityJogController(ArmController):
         drot_safe = twist_safe[..., 3:6]
 
         if self._mode == "rotate":
-            block = should_block_rotation(
-                jacobian_b=jac,
-                joint_pos=q_arm,
-                lower=q_lower,
-                upper=q_upper,
-                min_sigma_thresh=self.config.min_sigma_thresh,
-                joint_limit_margin=self.config.joint_limit_margin_rad,
-            )
-            drot_safe = torch.where(block.unsqueeze(-1), torch.zeros_like(drot_safe), drot_safe)
+            if self.config.min_sigma_thresh is not None:
+                sigma_min = smallest_singular_value(jac)
+                block_sigma = sigma_min < self.config.min_sigma_thresh
+                target_quat = self._ee_quat_last_safe_b if self._ee_quat_last_safe_b is not None else ee_quat_b
+                projected_drot = project_rotation_toward_quat(ee_quat_b, target_quat, drot_safe)
+                drot_safe = torch.where(block_sigma.unsqueeze(-1), projected_drot, drot_safe)
 
         if self._mode == "translate":
             pos_des = ws.clamp(ee_pos_b + dpos_safe, device=self.device)
