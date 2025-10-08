@@ -142,3 +142,75 @@ def project_rotation_toward_quat(current_quat: torch.Tensor, target_quat: torch.
     return err_dir * proj_mag_clamped
 
 
+
+def project_twist_away_from_low_sigma(
+    jacobian_b: torch.Tensor,
+    twist_b: torch.Tensor,
+    min_sigma_thresh: Optional[float],
+) -> torch.Tensor:
+    """Project task-space twist away from Jacobian directions with small singular values.
+
+    This removes only the components of the commanded twist that lie in ill-conditioned
+    Jacobian directions (low manipulability), allowing motion in other directions to pass.
+
+    Args:
+        jacobian_b: (N, 6, dof) end-effector Jacobian in base frame.
+        twist_b: (N, 6) task twist [vx, vy, vz, wx, wy, wz] in base frame.
+        min_sigma_thresh: if None -> no projection; otherwise directions with
+            singular values < threshold are filtered out.
+
+    Returns:
+        (N, 6) projected twist that avoids low-sigma directions.
+    """
+    if min_sigma_thresh is None:
+        return twist_b
+    # Batched thin SVD to get U (task-space singular vectors) and singular values
+    # jacobian_b is (N,6,dof) => U:(N,6,6), S:(N,6), Vh:(N,dof,dof) [only U,S needed]
+    U, S, _ = torch.linalg.svd(jacobian_b, full_matrices=False)
+    # Build a projection matrix P = U * M * U^T, where M selects low-sigma cols
+    low = (S < float(min_sigma_thresh)).to(twist_b.dtype)  # (N,6)
+    # Create diagonal M from low mask
+    M = torch.diag_embed(low)  # (N,6,6)
+    P = U @ M @ U.transpose(-1, -2)  # (N,6,6)
+    twist_b_col = twist_b.unsqueeze(-1)  # (N,6,1)
+    # Remove the component within the low-sigma subspace
+    removed = P @ twist_b_col  # (N,6,1)
+    result = twist_b_col - removed
+    return result.squeeze(-1)
+
+
+def clamp_qdot_near_limits(
+    qdot: torch.Tensor,
+    q: torch.Tensor,
+    lower: torch.Tensor,
+    upper: torch.Tensor,
+    margin: Optional[float],
+) -> torch.Tensor:
+    """Zero joint-velocity components that would push joints further into nearby limits.
+
+    Component-wise gating: only blocks velocity on joints that are within the margin and
+    commanded in the direction of the limit; other joints remain unaffected.
+
+    Args:
+        qdot: (N, dof) joint velocity command.
+        q: (N, dof) current joint positions.
+        lower: (N, dof) lower soft limits.
+        upper: (N, dof) upper soft limits.
+        margin: absolute radians; if None or <=0, returns qdot unchanged.
+
+    Returns:
+        (N, dof) gated joint velocities.
+    """
+    if margin is None or float(margin) <= 0.0:
+        return qdot
+    dist_to_lower = q - lower
+    dist_to_upper = upper - q
+    near_lower = dist_to_lower < float(margin)
+    near_upper = dist_to_upper < float(margin)
+    # Do not allow velocities that move further into the nearby limit
+    block_lower = near_lower & (qdot < 0.0)
+    block_upper = near_upper & (qdot > 0.0)
+    block = block_lower | block_upper
+    qdot_safe = qdot.clone()
+    qdot_safe[block] = 0.0
+    return qdot_safe
