@@ -9,8 +9,7 @@ from isaaclab.controllers import DifferentialIKController, DifferentialIKControl
 from isaaclab.utils.math import subtract_frame_transforms, quat_box_plus
 
 from ..base import ArmControllerConfig, ArmController
-from ..safety import WorkspaceBounds, hold_orientation
-from ..safety import project_twist_away_from_low_sigma, clamp_qdot_near_limits
+from ..safety import WorkspaceBounds, hold_orientation, project_twist_away_from_low_sigma, clamp_qdot_near_limits, should_block_rotation
 from dataclasses import dataclass
 
 @dataclass
@@ -25,7 +24,7 @@ class CartesianVelocityJogConfig(ArmControllerConfig):
     gripper_open_pos: float = 0.2
     gripper_close_pos: float = 1.2 
     # Safety thresholds (optional). Set to None to disable a check.
-    min_sigma_thresh: Optional[float] = 0.02  # block rotation if sigma_min < threshold
+    min_sigma_thresh: Optional[float] = 0.005  # block rotation if sigma_min < threshold
     joint_limit_margin_rad: Optional[float] = 0.10  # block rotation if any joint is within margin of limits
 
 
@@ -149,6 +148,17 @@ class CartesianVelocityJogController(ArmController):
         )
         dpos_safe = twist_safe[..., 0:3]
         drot_safe = twist_safe[..., 3:6]
+
+        if self._mode == "rotate":
+            block = should_block_rotation(
+                jacobian_b=jac,
+                joint_pos=q_arm,
+                lower=q_lower,
+                upper=q_upper,
+                min_sigma_thresh=self.config.min_sigma_thresh,
+                joint_limit_margin=self.config.joint_limit_margin_rad,
+            )
+            drot_safe = torch.where(block.unsqueeze(-1), torch.zeros_like(drot_safe), drot_safe)
 
         if self._mode == "translate":
             pos_des = ws.clamp(ee_pos_b + dpos_safe, device=self.device)
