@@ -5,6 +5,7 @@ from pathlib import Path
 
 import torch
 from isaaclab.app import AppLauncher
+from controllers import ModeManager
 
 # Ensure project root on sys.path for modular imports
 ROOT = Path(__file__).resolve().parents[1]
@@ -40,7 +41,6 @@ def main():
     parser.add_argument("--ee-frame", type=str, default="world", choices=["world", "base"], help="Frame for EE logging")
     parser.add_argument("--print-interval", type=int, default=1, help="Print every N steps")
     # Mode handling
-    parser.add_argument("--start-mode", type=str, default="translate", choices=["translate", "rotate", "gripper"], help="Initial mode")
     AppLauncher.add_app_launcher_args(parser)
     args_cli = parser.parse_args()
 
@@ -91,9 +91,9 @@ def main():
     controller = CartesianVelocityJogController(ctrl_cfg, num_envs=1, device=str(sim.device))
     
     # Mode management setup
-    mode_manager = ModeManager(initial_mode=str(args_cli.start_mode))
-    mode_manager.set_mode_change_callback(lambda mode: controller.set_mode(str(mode)))
-    controller.set_mode(str(args_cli.start_mode))  # Set initial mode
+    mode_manager = ModeManager(initial_mode="translate")
+    mode_manager.set_mode_change_callback(lambda mode: controller.set_mode(mode.value))
+    controller.set_mode("translate")  # Set initial mode
 
     if not args_cli.headless:
         keyboard = Se3KeyboardInput(
@@ -106,7 +106,7 @@ def main():
         translate_fn, rotate_fn, gripper_fn = mode_manager.get_mode_callbacks()
         keyboard.add_mode_callbacks(translate_fn, rotate_fn, gripper_fn)
 
-    print("[INFO]: Setup complete... (Mode keys: F/f/1=translate, R/r/2=rotate, G/g/3=gripper). Start mode=", args_cli.start_mode)
+    print("[INFO]: Setup complete... (Mode keys: F/f/1=translate, R/r/2=rotate, G/g/3=gripper). Start mode= translate")
     run(sim, robot, controller, simulation_app)
     simulation_app.close()
 
