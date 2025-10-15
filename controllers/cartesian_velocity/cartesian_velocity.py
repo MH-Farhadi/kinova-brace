@@ -29,8 +29,8 @@ class CartesianVelocityJogConfig(ArmControllerConfig):
         joint_limit_margin_rad=0.10,
     ))
     # Legacy workspace bounds (now part of safety_cfg, but kept for backward compat)
-    workspace_min: Optional[Tuple[float, float, float]] = field(default=(None, None, None))
-    workspace_max: Optional[Tuple[float, float, float]] = field(default=(None, None, None))
+    workspace_min: Optional[Tuple[Optional[float], Optional[float], Optional[float]]] = field(default=(None, None, None))
+    workspace_max: Optional[Tuple[Optional[float], Optional[float], Optional[float]]] = field(default=(None, None, None))
 
     def __post_init__(self):
         # Migrate legacy bounds to safety_cfg if not set
@@ -52,7 +52,7 @@ class CartesianVelocityJogController(ArmController):
     def __init__(self, config: CartesianVelocityJogConfig, num_envs: int = 1, device: Optional[str] = None) -> None:
         super().__init__(config, num_envs=num_envs, device=device)
         self.config: CartesianVelocityJogConfig
-        self.safety = ArmSafety(self.config.safety_cfg, num_envs, device)
+        self.safety = ArmSafety(self.config.safety_cfg, num_envs, str(self.device))
         self._diff_ik: Optional[DifferentialIKController] = None
         self._arm_joint_ids = None
         self._gripper_joint_ids = None
@@ -65,8 +65,6 @@ class CartesianVelocityJogController(ArmController):
         self._refresh_hold_ori_on_translate: bool = False
 
     def set_mode(self, mode: Literal["translate", "rotate", "gripper"]) -> None:
-        if mode not in ("translate", "rotate", "gripper"):
-            raise ValueError("mode must be 'translate', 'rotate', or 'gripper'")
         if self._mode != mode:
             self._mode = mode
             print(f"[CTRL] Mode set to: {self._mode}")
