@@ -6,27 +6,24 @@ from typing import Tuple
 
 @dataclass
 class PhysicsConfig:
-    """Centralized physics configuration for simulation and spawned rigid objects.
-
-    Use this to avoid scattering physics flags across CLI and code paths.
-    """
+    """Centralized physics configuration for simulation and spawned rigid objects."""
 
     # Simulation settings
     device: str = "cuda:0"
-    dt: float = 1.0 / 80.0
+    dt: float = 1.0 / 60.0
     gravity: Tuple[float, float, float] = (0.0, 0.0, -9.81)
 
     # Rigid object defaults
     enable_physics: bool = True
-    density: float | None = 800.0
+    density: float | None = 600.0
     mass_kg: float | None = None
-    contact_offset: float = 0.003
-    rest_offset: float = 0.0
+    contact_offset: float = 0.005
+    rest_offset: float = 0.0015
 
-    # Spawn placement conveniences
-    snap_z_to: float | None = None
-    z_clearance: float = 0.02
-    orientation_euler_deg: Tuple[float, float, float] | None = (90, 0, 0)
+    # Spawn placement
+    snap_z_to: float | None = 0.82  # Table surface height
+    z_clearance: float = 0.005
+    orientation_euler_deg: Tuple[float, float, float] | None = (-90, 0, 0)
 
     # Visual fallback
     apply_preview_surface: bool = False
@@ -34,14 +31,13 @@ class PhysicsConfig:
 
 
 def apply_to_simulation_cfg(sim_cfg, phys: PhysicsConfig) -> None:
-    """Mutate an isaaclab.sim.SimulationCfg with values from PhysicsConfig."""
+    """Apply physics settings to simulation configuration."""
     sim_cfg.dt = float(phys.dt)
     sim_cfg.gravity = tuple(phys.gravity)
-    # device is handled at SimulationCfg creation in demo.py
 
 
 def object_loader_kwargs_from_physix(phys: PhysicsConfig) -> dict:
-    """Translate PhysicsConfig into ObjectLoaderConfig kwargs."""
+    """Convert PhysicsConfig to ObjectLoaderConfig kwargs."""
     return {
         "enable_physics": bool(phys.enable_physics),
         "density": None if phys.density is None else float(phys.density),
@@ -54,5 +50,3 @@ def object_loader_kwargs_from_physix(phys: PhysicsConfig) -> dict:
         "apply_preview_surface": bool(phys.apply_preview_surface),
         "preview_surface_diffuse": tuple(phys.preview_surface_diffuse),
     }
-
-

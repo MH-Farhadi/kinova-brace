@@ -33,10 +33,11 @@ def design_scene(scene_cfg: "SceneConfig") -> tuple[dict, list[list[float]]]:
 
     # Origin 1 with Kinova JACO2 (6-DoF)
     prim_utils.create_prim("/World/Origin1", "Xform", translation=origins[0])
-    # -- Table
+    # -- Table (ensure it has collision for objects to rest on)
     cfg = sim_utils.UsdFileCfg(
         usd_path=scene_cfg.table_usd_path,
         scale=scene_cfg.table_scale,
+        # Note: Table USD already has collision; avoid overriding instanceable collision prims
     )
     cfg.func("/World/Origin1/Table", cfg, translation=scene_cfg.table_translation)
     # -- Robot

@@ -19,17 +19,17 @@ def add_demo_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParse
         "--spawn-min",
         type=float,
         nargs=3,
-        default=[0.2, -0.3, 0.80],
+        default=[0.2, -0.3, 0.9],
         help="Spawn AABB min xyz (m) relative to /World/Origin1",
     )
     parser.add_argument(
         "--spawn-max",
         type=float,
         nargs=3,
-        default=[0.60, 0.45, 0.80],
+        default=[0.60, 0.45, 1.05],
         help="Spawn AABB max xyz (m) relative to /World/Origin1",
     )
-    parser.add_argument("--min-distance", type=float, default=0.03, help="Min distance between objects (m)")
+    parser.add_argument("--min-distance", type=float, default=0.1, help="Min distance between objects (m)")
     parser.add_argument("--scale-min", type=float, default=None, help="Optional uniform scale min for objects")
     parser.add_argument("--scale-max", type=float, default=None, help="Optional uniform scale max for objects")
     # Physics-related controls are now centralized in environments/physix.py
