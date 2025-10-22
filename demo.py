@@ -47,13 +47,18 @@ def main():
     try:
         from environments.reach_to_grasp.config import DEFAULT_SCENE, DEFAULT_CAMERA
         from environments.reach_to_grasp.utils import design_scene
-        from datasets.object_loader import ObjectLoader, ObjectLoaderConfig, SpawnBounds
+        from environments.object_loader import ObjectLoader, ObjectLoaderConfig, SpawnBounds
+        from environments.physix import PhysicsConfig, apply_to_simulation_cfg, object_loader_kwargs_from_physix
     except Exception:
         from ..environments.reach_to_grasp.config import DEFAULT_SCENE, DEFAULT_CAMERA  # type: ignore
         from ..environments.reach_to_grasp.utils import design_scene  # type: ignore
-        from ..datasets.object_loader import ObjectLoader, ObjectLoaderConfig, SpawnBounds  # type: ignore
+        from ..environments.object_loader import ObjectLoader, ObjectLoaderConfig, SpawnBounds  # type: ignore
+        from ..environments.physix import PhysicsConfig, apply_to_simulation_cfg, object_loader_kwargs_from_physix  # type: ignore
 
-    sim_cfg = sim_utils.SimulationCfg(device=args_cli.device)
+    # Load physics config (for now use defaults; you can import a custom one here)
+    phys = PhysicsConfig(device=args_cli.device)
+    sim_cfg = sim_utils.SimulationCfg(device=phys.device)
+    apply_to_simulation_cfg(sim_cfg, phys)
     sim = sim_utils.SimulationContext(sim_cfg)
     if not args_cli.headless:
         sim.set_camera_view(DEFAULT_CAMERA.eye, DEFAULT_CAMERA.target)
@@ -68,20 +73,22 @@ def main():
         if args_cli.scale_min is not None and args_cli.scale_max is not None:
             scale_range = (float(args_cli.scale_min), float(args_cli.scale_max))
 
-        # Determine density value while preserving default if not specified
-        density_val = float(args_cli.density) if args_cli.density is not None else 500.0
+        # Resolve default dataset dir to YCB on Nucleus (fallback to public S3 if needed)
+        try:
+            from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR  # type: ignore
+            ycb_dir = f"{ISAAC_NUCLEUS_DIR}/Props/YCB"
+        except Exception:
+            ycb_dir = "https://omniverse-content-production.s3-us-west-2.amazonaws.com/Assets/Isaac/5.0/Isaac/Props/YCB"
+
+        # Translate physics defaults to loader kwargs
+        phys_loader_kwargs = object_loader_kwargs_from_physix(phys)
 
         loader_cfg = ObjectLoaderConfig(
-            nucleus_dirs=[],  # empty => default to ISAAC_NUCLEUS_DIR/Props/YCB in loader
+            dataset_dirs=[ycb_dir],
             bounds=SpawnBounds(min_xyz=tuple(args_cli.spawn_min), max_xyz=tuple(args_cli.spawn_max)),
             min_distance=float(args_cli.min_distance),
             uniform_scale_range=scale_range,
-            apply_preview_surface=bool(args_cli.apply_preview_surface),
-            preview_surface_diffuse=tuple(args_cli.preview_surface_diffuse),
-            snap_z_to=float(args_cli.snap_z_to) if args_cli.snap_z_to is not None else None,
-            z_clearance=float(args_cli.z_clearance),
-            mass_kg=float(args_cli.mass_kg) if args_cli.mass_kg is not None else None,
-            density=density_val,
+            **phys_loader_kwargs,
         )
         loader = ObjectLoader(loader_cfg)
         spawned_paths = loader.spawn(parent_prim_path="/World/Origin1", num_objects=int(args_cli.num_objects))

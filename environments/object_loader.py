@@ -37,13 +37,16 @@ class ObjectLoaderConfig:
     enable_physics: bool = True
     # Mass properties: choose either mass (kg) or density (kg/m^3). If both None, leave as USD default.
     mass_kg: float | None = None
-    density: float | None = 500.0
+    density: float | None = 400.0
     # Collision tuning
     contact_offset: float = 0.003
     rest_offset: float = 0.0
     # Z placement control: if provided, override sampled z to be (snap_z_to + z_clearance)
     snap_z_to: float | None = None
     z_clearance: float = 0.02
+    # Orientation at spawn: Euler degrees in XYZ order applied about parent axes
+    # e.g., (0, 0, 90) to rotate 90 degrees around Z.
+    orientation_euler_deg: tuple[float, float, float] | None = None
 
 
 class ObjectLoader:
@@ -278,8 +281,44 @@ class ObjectLoader:
                 usd_cfg.visual_material = preview  # type: ignore[attr-defined]
 
             prim_path = f"{objects_root}/Obj_{idx:02d}"
+            # Optional orientation
+            orientation_arg = None
+            if self.cfg.orientation_euler_deg is not None:
+                # Preferred: compute quaternion from Euler using Isaac Lab math utils
+                q = None
+                try:
+                    import math
+                    import torch
+                    from isaaclab.utils.math import quat_from_euler_xyz
+                    roll_deg, pitch_deg, yaw_deg = self.cfg.orientation_euler_deg
+                    r = torch.tensor([math.radians(float(roll_deg))])
+                    p = torch.tensor([math.radians(float(pitch_deg))])
+                    y = torch.tensor([math.radians(float(yaw_deg))])
+                    q_tensor = quat_from_euler_xyz(r, p, y)[0]
+                    qw, qx, qy, qz = [float(v) for v in q_tensor.tolist()]
+                    q = (qw, qx, qy, qz)
+                except Exception:
+                    q = None
+                if q is not None:
+                    orientation_arg = q
+                else:
+                    # Fallback: directly compute axis-only rotations without torch
+                    rx, ry, rz = self.cfg.orientation_euler_deg
+                    import math
+                    if abs(rx) > 0 and abs(ry) == 0 and abs(rz) == 0:
+                        a = math.radians(rx) * 0.5
+                        orientation_arg = (math.cos(a), math.sin(a), 0.0, 0.0)
+                    elif abs(ry) > 0 and abs(rx) == 0 and abs(rz) == 0:
+                        a = math.radians(ry) * 0.5
+                        orientation_arg = (math.cos(a), 0.0, math.sin(a), 0.0)
+                    elif abs(rz) > 0 and abs(rx) == 0 and abs(ry) == 0:
+                        a = math.radians(rz) * 0.5
+                        orientation_arg = (math.cos(a), 0.0, 0.0, math.sin(a))
             try:
-                usd_cfg.func(prim_path, usd_cfg, translation=pos)
+                if orientation_arg is not None:
+                    usd_cfg.func(prim_path, usd_cfg, translation=pos, orientation=orientation_arg)
+                else:
+                    usd_cfg.func(prim_path, usd_cfg, translation=pos)
                 spawned_prim_paths.append(prim_path)
             except Exception as exc:  # pragma: no cover - robust to malformed USDs
                 print(f"[ObjectLoader] Failed to spawn '{usd_path}' at {prim_path}: {exc}")
