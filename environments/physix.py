@@ -10,7 +10,8 @@ class PhysicsConfig:
 
     # Simulation settings
     device: str = "cuda:0"
-    dt: float = 1.0 / 60.0
+    dt: float = 1.0 / 120.0
+    sub_steps: int = 2
     gravity: Tuple[float, float, float] = (0.0, 0.0, -9.81)
 
     # Rigid object defaults
@@ -33,6 +34,7 @@ class PhysicsConfig:
 def apply_to_simulation_cfg(sim_cfg, phys: PhysicsConfig) -> None:
     """Apply physics settings to simulation configuration."""
     sim_cfg.dt = float(phys.dt)
+    sim_cfg.sub_steps = int(phys.sub_steps)
     sim_cfg.gravity = tuple(phys.gravity)
 
 
