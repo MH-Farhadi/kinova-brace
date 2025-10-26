@@ -21,7 +21,7 @@ class CartesianVelocityJogConfig(ArmControllerConfig):
     hold_orientation: bool = True
     # Gripper settings
     gripper_joint_regex: str = ".*_joint_finger_.*|.*_joint_finger_tip_.*"
-    gripper_open_pos: float = 0.2
+    gripper_open_pos: float = 0.0
     gripper_close_pos: float = 1.2 
     # Safety config (legacy thresholds moved here)
     safety_cfg: ArmSafetyCfg = field(default_factory=lambda: ArmSafetyCfg(
@@ -55,11 +55,14 @@ class CartesianVelocityJogController(ArmController):
         self.safety = ArmSafety(self.config.safety_cfg, num_envs, str(self.device))
         self._diff_ik: Optional[DifferentialIKController] = None
         self._arm_joint_ids = None
-        self._gripper_joint_ids = None
+        self._gripper_base_joint_ids = None
+        self._gripper_tip_joint_ids = None
         self._ee_body_id = None
         self._ee_jacobi_idx = None
         self._ee_quat_hold_b: Optional[torch.Tensor] = None
         self._ee_quat_last_safe_b: Optional[torch.Tensor] = None
+        self._gripper_hold_pos_base: Optional[torch.Tensor] = None
+        self._gripper_hold_pos_tip: Optional[torch.Tensor] = None
         self._step_count = 0
         self._mode: Literal["translate", "rotate", "gripper"] = "translate"
         self._refresh_hold_ori_on_translate: bool = False
@@ -87,11 +90,23 @@ class CartesianVelocityJogController(ArmController):
         self._ee_jacobi_idx = self._ee_body_id - 1 if robot.is_fixed_base else self._ee_body_id
         arm_joint_ids, _ = robot.find_joints(self.config.arm_joint_regex)
         self._arm_joint_ids = arm_joint_ids
-        gripper_joint_ids, _ = robot.find_joints(self.config.gripper_joint_regex)
-        self._gripper_joint_ids = gripper_joint_ids
+        gripper_joint_ids, gripper_joint_names = robot.find_joints(self.config.gripper_joint_regex)
+        # Split gripper joints into base and tip groups
+        try:
+            ids_list = gripper_joint_ids.tolist() if torch.is_tensor(gripper_joint_ids) else list(gripper_joint_ids)
+        except Exception:
+            ids_list = list(gripper_joint_ids)
+        base_ids = [jid for jid, name in zip(ids_list, gripper_joint_names) if "finger_tip" not in name]
+        tip_ids = [jid for jid, name in zip(ids_list, gripper_joint_names) if "finger_tip" in name]
+        self._gripper_base_joint_ids = base_ids
+        self._gripper_tip_joint_ids = tip_ids
 
-        # Hold current joint positions as position targets
+        # Hold current joint positions as position targets (and capture gripper hold)
         robot.set_joint_position_target(robot.data.joint_pos)
+        if self._gripper_base_joint_ids:
+            self._gripper_hold_pos_base = robot.data.joint_pos[:, self._gripper_base_joint_ids].clone()
+        if self._gripper_tip_joint_ids:
+            self._gripper_hold_pos_tip = robot.data.joint_pos[:, self._gripper_tip_joint_ids].clone()
 
         # Capture initial EE orientation in base frame to optionally hold during translation
         root_pose_w = robot.data.root_pose_w
@@ -189,22 +204,40 @@ class CartesianVelocityJogController(ArmController):
         robot.set_joint_velocity_target(torch.zeros_like(robot.data.joint_vel))
         robot.set_joint_velocity_target(qdot_arm, joint_ids=self._arm_joint_ids)
 
+        # Always hold gripper at last commanded position to keep shape across modes
+        if self._gripper_base_joint_ids and self._gripper_hold_pos_base is not None:
+            robot.set_joint_position_target(self._gripper_hold_pos_base, joint_ids=self._gripper_base_joint_ids)
+        if self._gripper_tip_joint_ids and self._gripper_hold_pos_tip is not None:
+            robot.set_joint_position_target(self._gripper_hold_pos_tip, joint_ids=self._gripper_tip_joint_ids)
+
         # Gripper control in gripper mode using g_val
-        if self._gripper_joint_ids:
-            try:
-                num_gripper_joints = len(self._gripper_joint_ids)  # list-like
-            except TypeError:
-                num_gripper_joints = int(self._gripper_joint_ids.shape[0])  # tensor-like
-            if self._mode == "gripper" and g_val is not None and num_gripper_joints > 0:
-                open_cmd = (g_val.mean().item() > 0.0)
-                target_val = self.config.gripper_open_pos if open_cmd else self.config.gripper_close_pos
-                target = torch.full(
-                    (robot.data.joint_pos.shape[0], num_gripper_joints),
-                    fill_value=target_val,
+        if self._mode == "gripper" and g_val is not None:
+            open_cmd = (g_val.mean().item() > 0.0)
+            base_target_val = self.config.gripper_open_pos if open_cmd else self.config.gripper_close_pos
+            # Slight tip bend when closing: small fraction of base close
+            if open_cmd:
+                tip_target_val = 0.0
+            else:
+                tip_target_val = min(base_target_val * 0.35, 0.4)  # cap tip bend
+
+            if self._gripper_base_joint_ids:
+                target_base = torch.full(
+                    (robot.data.joint_pos.shape[0], len(self._gripper_base_joint_ids)),
+                    fill_value=base_target_val,
                     dtype=robot.data.joint_pos.dtype,
                     device=self.device,
                 )
-                robot.set_joint_position_target(target, joint_ids=self._gripper_joint_ids)
+                robot.set_joint_position_target(target_base, joint_ids=self._gripper_base_joint_ids)
+                self._gripper_hold_pos_base = target_base.clone()
+            if self._gripper_tip_joint_ids:
+                target_tip = torch.full(
+                    (robot.data.joint_pos.shape[0], len(self._gripper_tip_joint_ids)),
+                    fill_value=tip_target_val,
+                    dtype=robot.data.joint_pos.dtype,
+                    device=self.device,
+                )
+                robot.set_joint_position_target(target_tip, joint_ids=self._gripper_tip_joint_ids)
+                self._gripper_hold_pos_tip = target_tip.clone()
 
         # Gravity compensation
         gravity = robot.root_physx_view.get_gravity_compensation_forces()
