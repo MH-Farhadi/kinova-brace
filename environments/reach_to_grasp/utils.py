@@ -46,15 +46,6 @@ def design_scene(scene_cfg: "SceneConfig") -> tuple[dict, list[list[float]]]:
     kinova_j2n6_cfg = dc_replace(BASE_ROBOT_CFG, prim_path=scene_cfg.robot_prim_path)
     kinova_j2n6_cfg.init_state.pos = (0.0, 0.0, scene_cfg.robot_base_height)
 
-    # Override gripper actuator to drive only base finger joints (not tips)
-    # This yields a more natural closing shape and improves contact with objects.
-    kinova_j2n6_cfg.actuators["gripper"] = ImplicitActuatorCfg(
-        joint_names_expr=[".*_finger_[1-3]"],  # remove finger_tip joints from actuation
-        effort_limit_sim=10.0,                  # stronger squeeze
-        stiffness=14.0,                          # less floppy
-        damping=1,                            # more stable closing
-    )
-
     # Optional initial joint configuration (by name or regex) if provided via scene config
     if getattr(scene_cfg, "robot_default_joint_pos", None):
         kinova_j2n6_cfg.init_state.joint_pos = scene_cfg.robot_default_joint_pos  # type: ignore[arg-type]

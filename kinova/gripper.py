@@ -24,12 +24,25 @@ class GripperConfig:
     joint_regex: str = ".*_joint_finger_.*|.*_joint_finger_tip_.*"
     open_position: float = 0.0
     close_position: float = 1.2
-    stiffness: float = 1.2
-    damping: float = 0.01
+    stiffness: float = 14.0
+    damping: float = 1.0
     max_velocity: Optional[float] = None
-    effort_limit: Optional[float] = None
+    effort_limit: Optional[float] = 10.0
     split_base_and_tip: bool = True
-    tip_ratio_on_close: float = 0.35
+    tip_ratio_on_close: float = 0.4
+    # Optional cap on tip close target; set to None to disable clamping
+    tip_close_max: Optional[float] = None
+
+    # Stable grasp tuning (optional; used by apply_stable_grasp_tuning)
+    enable_stable_grasp_tuning: bool = True
+    static_friction: float = 5
+    dynamic_friction: float = 5
+    restitution: float = 0.0
+    friction_combine_mode: str = "max"
+    torsional_patch_radius: float = 0.01
+    min_torsional_patch_radius: float = 0.005
+    contact_offset: float = 0.002
+    rest_offset: float = 0.0
 
 
 class GripperController:
@@ -103,7 +116,12 @@ class GripperController:
         self._command_to(robot, base_val=self.cfg.open_position, tip_val=0.0)
 
     def command_close(self, robot) -> None:
-        tip_val = min(self.cfg.close_position * self.cfg.tip_ratio_on_close, 0.4) if self._tip_joint_ids else self.cfg.close_position
+        if self._tip_joint_ids:
+            tip_val = self.cfg.close_position * self.cfg.tip_ratio_on_close
+            if self.cfg.tip_close_max is not None:
+                tip_val = min(tip_val, float(self.cfg.tip_close_max))
+        else:
+            tip_val = self.cfg.close_position
         self._command_to(robot, base_val=self.cfg.close_position, tip_val=tip_val)
 
     def _command_to(self, robot, *, base_val: float, tip_val: float) -> None:
@@ -131,6 +149,7 @@ class GripperController:
 
         Use this if you want to push low-level joint drive properties directly to USD/PhysX.
         """
+
         try:
             import isaaclab.sim as sim_utils
             from isaaclab.sim.schemas.schemas_cfg import JointDrivePropertiesCfg
@@ -141,8 +160,65 @@ class GripperController:
                 max_effort=self.cfg.effort_limit,
             )
             sim_utils.modify_joint_drive_properties(prim_path, cfg)
-        except Exception:
-            # Best-effort: schema may not apply on all robot assets
-            pass
+            print(
+                f"[Gripper] Drive gains applied at '{prim_path}': "
+                f"stiffness={self.cfg.stiffness}, damping={self.cfg.damping}, "
+                f"max_velocity={self.cfg.max_velocity}, max_effort={self.cfg.effort_limit}"
+            )
+        except Exception as e:
+            print(f"[Gripper] Failed to apply drive gains at '{prim_path}': {e}")
+
+
+    def apply_stable_grasp_tuning(self, prim_path: str) -> None:
+        """Optionally increase friction and contact quality on the robot gripper colliders.
+
+        Applies:
+        - Higher static/dynamic friction via RigidBodyMaterialCfg bound to gripper prims.
+        - Torsional friction and reduced contact offsets to reduce slip.
+        """
+        if not self.cfg.enable_stable_grasp_tuning:
+            print("[Gripper] Stable grasp tuning disabled (enable_stable_grasp_tuning=False).")
+            return
+        try:
+            import isaaclab.sim as sim_utils
+            from isaaclab.sim.schemas.schemas_cfg import CollisionPropertiesCfg
+
+            # Increase collider quality under prim_path (includes finger links)
+            col_cfg = CollisionPropertiesCfg(
+                contact_offset=self.cfg.contact_offset,
+                rest_offset=self.cfg.rest_offset,
+                torsional_patch_radius=self.cfg.torsional_patch_radius,
+                min_torsional_patch_radius=self.cfg.min_torsional_patch_radius,
+            )
+            sim_utils.modify_collision_properties(prim_path, col_cfg)
+            print(
+                f"[Gripper] Collision properties updated at '{prim_path}': "
+                f"contact_offset={self.cfg.contact_offset}, rest_offset={self.cfg.rest_offset}, "
+                f"torsional_patch_radius={self.cfg.torsional_patch_radius}, "
+                f"min_torsional_patch_radius={self.cfg.min_torsional_patch_radius}"
+            )
+
+            # Bind a high-friction physics material under prim_path
+            from isaaclab.sim.spawners.materials.physics_materials_cfg import RigidBodyMaterialCfg
+            mat_cfg = RigidBodyMaterialCfg(
+                static_friction=self.cfg.static_friction,
+                dynamic_friction=self.cfg.dynamic_friction,
+                restitution=self.cfg.restitution,
+                friction_combine_mode=self.cfg.friction_combine_mode,  # type: ignore[arg-type]
+            )
+            mat_prim = f"{prim_path}/GripperFrictionMaterial"
+            mat_cfg.func(mat_prim, mat_cfg)  # create material prim
+            sim_utils.bind_physics_material(prim_path, mat_prim)
+            print(
+                f"[Gripper] Physics material bound at '{prim_path}': material='{mat_prim}', "
+                f"static_friction={self.cfg.static_friction}, dynamic_friction={self.cfg.dynamic_friction}, "
+                f"restitution={self.cfg.restitution}, combine_mode='{self.cfg.friction_combine_mode}'"
+            )
+        except Exception as e:
+            # Best-effort: depends on asset structure and permissions on instanceable prims
+            print(
+                f"[Gripper] Stable grasp tuning attempted at '{prim_path}', but some operations failed: {e}. "
+                "If the asset is instanceable, per-link bindings may be restricted."
+            )
 
 

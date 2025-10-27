@@ -108,6 +108,11 @@ class CartesianVelocityJogController(ArmController):
         robot.set_joint_position_target(robot.data.joint_pos)
         self.gripper.resolve_joints(robot)
         self.gripper.reset(robot)
+        # Apply stable grasp tuning and drive gains on the robot prim path when available
+        prim_path = getattr(getattr(robot, "cfg", None), "prim_path", None)
+        if isinstance(prim_path, str):
+            self.gripper.set_drive_gains(prim_path)
+            self.gripper.apply_stable_grasp_tuning(prim_path)
 
         # Capture initial EE orientation in base frame to optionally hold during translation
         root_pose_w = robot.data.root_pose_w
