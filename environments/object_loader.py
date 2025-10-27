@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, Sequence
 
+from isaaclab.sim.spawners.from_files import UsdFileCfg
 
 @dataclass
 class SpawnBounds:
@@ -290,7 +291,7 @@ class ObjectLoader:
                 s = random.uniform(smin, smax)
                 scale_arg = (s, s, s)
 
-            usd_cfg = sim_utils.UsdFileCfg(
+            usd_cfg = UsdFileCfg(
                 usd_path=str(usd_path),
                 scale=scale_arg,
             )
