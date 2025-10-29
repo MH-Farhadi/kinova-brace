@@ -10,8 +10,8 @@ class PhysicsConfig:
 
     # Simulation settings
     device: str = "cuda:0"
-    dt: float = 1.0 / 120.0
-    sub_steps: int = 2
+    dt: float = 1.0 / 240.0
+    sub_steps: int = 4
     gravity: Tuple[float, float, float] = (0.0, 0.0, -9.81)
 
     # Rigid object defaults
@@ -20,6 +20,13 @@ class PhysicsConfig:
     mass_kg: float | None = None
     contact_offset: float = 0.005
     rest_offset: float = 0.0015
+    # Object friction/material defaults
+    object_static_friction: float = 3.0
+    object_dynamic_friction: float = 3.0
+    object_restitution: float = 0.0
+    object_friction_combine_mode: str = "max"
+    object_torsional_patch_radius: float = 0.02
+    object_min_torsional_patch_radius: float = 0.01
 
     # Spawn placement
     snap_z_to: float | None = 0.82  # Table surface height
@@ -46,6 +53,12 @@ def object_loader_kwargs_from_physix(phys: PhysicsConfig) -> dict:
         "mass_kg": None if phys.mass_kg is None else float(phys.mass_kg),
         "contact_offset": float(phys.contact_offset),
         "rest_offset": float(phys.rest_offset),
+        "static_friction": float(phys.object_static_friction),
+        "dynamic_friction": float(phys.object_dynamic_friction),
+        "restitution": float(phys.object_restitution),
+        "friction_combine_mode": str(phys.object_friction_combine_mode),
+        "torsional_patch_radius": float(phys.object_torsional_patch_radius),
+        "min_torsional_patch_radius": float(phys.object_min_torsional_patch_radius),
         "snap_z_to": None if phys.snap_z_to is None else float(phys.snap_z_to),
         "z_clearance": float(phys.z_clearance),
         "orientation_euler_deg": None if phys.orientation_euler_deg is None else tuple(phys.orientation_euler_deg),

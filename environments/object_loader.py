@@ -35,6 +35,13 @@ class ObjectLoaderConfig:
     density: float | None = 500.0
     contact_offset: float = 0.005
     rest_offset: float = 0.001
+    # Friction and contact quality
+    static_friction: float = 100.0
+    dynamic_friction: float = 100.0
+    restitution: float = 0.0
+    friction_combine_mode: str = "max"
+    torsional_patch_radius: float = 0.02
+    min_torsional_patch_radius: float = 0.01
     
     # Z placement control
     snap_z_to: float | None = None
@@ -236,6 +243,7 @@ class ObjectLoader:
                 define_collision_properties,
                 define_mass_properties,
             )
+            from isaaclab.sim.spawners.materials.physics_materials_cfg import RigidBodyMaterialCfg
             
             # Apply rigid body
             rb_cfg = sim_utils.RigidBodyPropertiesCfg(
@@ -245,14 +253,27 @@ class ObjectLoader:
             )
             define_rigid_body_properties(prim_path, rb_cfg)
             
-            # Apply collision
+            # Apply collision (including torsional/contact tuning)
             col_cfg = sim_utils.CollisionPropertiesCfg(
                 collision_enabled=True,
                 contact_offset=self.cfg.contact_offset,
                 rest_offset=self.cfg.rest_offset,
+                torsional_patch_radius=self.cfg.torsional_patch_radius,
+                min_torsional_patch_radius=self.cfg.min_torsional_patch_radius,
             )
             define_collision_properties(prim_path, col_cfg)
             
+            # Bind a high-friction physics material to the object root
+            mat_cfg = RigidBodyMaterialCfg(
+                static_friction=self.cfg.static_friction,
+                dynamic_friction=self.cfg.dynamic_friction,
+                restitution=self.cfg.restitution,
+                friction_combine_mode=self.cfg.friction_combine_mode,  # type: ignore[arg-type]
+            )
+            mat_prim = f"{prim_path}/ObjFrictionMaterial"
+            mat_cfg.func(mat_prim, mat_cfg)
+            sim_utils.bind_physics_material(prim_path, mat_prim)
+
             # Apply mass
             mass_val = 0.3  # Default 300g
             if self.cfg.mass_kg is not None:
