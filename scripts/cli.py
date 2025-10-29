@@ -10,8 +10,8 @@ def add_demo_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParse
     """
     # Robot/controller
     parser.add_argument("--ee_link", type=str, default="j2n6s300_end_effector", help="End-effector link name")
-    parser.add_argument("--speed", type=float, default=0.20, help="Linear speed (m/s)")
-    parser.add_argument("--rot-speed", type=float, default=0.5, help="Angular speed (rad/s)")
+    parser.add_argument("--speed", type=float, default=0.7, help="Linear speed (m/s)")
+    parser.add_argument("--rot-speed", type=float, default=2.0, help="Angular speed (rad/s)")
 
     # Object spawning (Nucleus-only)
     parser.add_argument("--num-objects", type=int, default=4, help="Number of random objects to spawn")
