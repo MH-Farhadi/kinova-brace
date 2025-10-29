@@ -24,10 +24,10 @@ class GripperConfig:
     joint_regex: str = ".*_joint_finger_.*|.*_joint_finger_tip_.*"
     open_position: float = 0.0
     close_position: float = 1.2
-    stiffness: float = 14.0
+    stiffness: float = 22.0
     damping: float = 1.0
     max_velocity: Optional[float] = None
-    effort_limit: Optional[float] = 10.0
+    effort_limit: Optional[float] = 50.0
     split_base_and_tip: bool = True
     tip_ratio_on_close: float = 0.4
     # Optional cap on tip close target; set to None to disable clamping
@@ -35,8 +35,8 @@ class GripperConfig:
 
     # Stable grasp tuning (optional; used by apply_stable_grasp_tuning)
     enable_stable_grasp_tuning: bool = True
-    static_friction: float = 5
-    dynamic_friction: float = 5
+    static_friction: float = 10
+    dynamic_friction: float = 10
     restitution: float = 0.0
     friction_combine_mode: str = "max"
     torsional_patch_radius: float = 0.01
