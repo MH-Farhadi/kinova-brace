@@ -18,15 +18,22 @@ from controllers import (
     Se3KeyboardInput,
     ModeManager,
 )
+from assist.config import AssistConfig, from_cli_args
+from assist.input_mux import CommandMuxInputProvider
+from assist.objects import ObjectsTracker
+from assist.orchestrator import AssistOrchestrator
 
 
-def run(sim, robot, controller: CartesianVelocityJogController, simulation_app):
+def run(sim, robot, controller: CartesianVelocityJogController, simulation_app, orchestrator: AssistOrchestrator | None, mux_input: CommandMuxInputProvider | None):
     dt = sim.get_physics_dt()
     controller.reset(robot)
     while simulation_app.is_running():
         controller.step(robot, dt)
         sim.step()
         robot.update(dt)
+        if orchestrator is not None and mux_input is not None:
+            orchestrator.set_last_user_cmd(mux_input.last_cmd)
+            orchestrator.tick(dt)
 
 
 def main():
@@ -66,6 +73,7 @@ def main():
     robot = scene_entities["kinova_j2n6s300"]
 
     # Spawn objects from Nucleus YCB
+    spawned_paths = []
     if not args_cli.no_objects:
         # Resolve YCB path
         try:
@@ -120,18 +128,40 @@ def main():
     mode_manager.set_mode_change_callback(lambda mode: controller.set_mode(mode.value))
     controller.set_mode("translate")
 
+    # Assist orchestrator (optional)
+    orchestrator = None
+    mux_input = None
+    if bool(getattr(args_cli, "assist", False)):
+        assist_cfg: AssistConfig = from_cli_args(args_cli)
+        # Objects tracker from spawned paths (if any)
+        prim_paths = spawned_paths if not args_cli.no_objects and 'spawned_paths' in locals() else []
+        tracker = ObjectsTracker(prim_paths=prim_paths)
+        mux_input = CommandMuxInputProvider()
+        controller.set_input_provider(mux_input)
+        orchestrator = AssistOrchestrator(assist_cfg, sim, robot, controller, tracker, mux_input, physics_dt=sim.get_physics_dt())
+
     if not args_cli.headless:
         keyboard = Se3KeyboardInput(
             pos_sensitivity_per_step=ctrl_cfg.linear_speed_mps * sim.get_physics_dt(),
             rot_sensitivity_rad_per_step=float(args_cli.rot_speed) * sim.get_physics_dt(),
         )
-        controller.set_input_provider(keyboard)
-        
+        if mux_input is not None:
+            mux_input.set_base(keyboard)
+        else:
+            controller.set_input_provider(keyboard)
+
         translate_fn, rotate_fn, gripper_fn = mode_manager.get_mode_callbacks()
         keyboard.add_mode_callbacks(translate_fn, rotate_fn, gripper_fn)
+        if orchestrator is not None:
+            keyboard.add_dialogue_callbacks(
+                yes_fn=lambda: orchestrator.on_yes(),
+                no_fn=lambda: orchestrator.on_no(),
+                choose1_fn=lambda: orchestrator.on_choice(1),
+                choose2_fn=lambda: orchestrator.on_choice(2),
+            )
 
-    print("[INFO]: Setup complete... (Mode keys: F/f/1=translate, R/r/2=rotate, G/g/3=gripper)")
-    run(sim, robot, controller, simulation_app)
+    print("[INFO]: Setup complete... (Mode keys: F/f/1=translate, R/r/2=rotate, G/g/3=gripper; Dialogue: Y/N and A/B or 1/2)")
+    run(sim, robot, controller, simulation_app, orchestrator, mux_input)
     simulation_app.close()
 
 
