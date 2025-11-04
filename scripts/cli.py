@@ -40,13 +40,7 @@ def add_demo_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParse
     parser.add_argument("--ee-frame", type=str, default="world", choices=["world", "base"], help="EE logging frame")
     parser.add_argument("--print-interval", type=int, default=1, help="Print every N steps")
 
-    # Assist layer (v0)
-    parser.add_argument("--assist", action="store_true", help="Enable assist suggestion and actions")
-    parser.add_argument("--assist-rate-hz", type=int, default=10, help="Assist tick rate in Hz (default 10)")
-    parser.add_argument("--assist-window-s", type=float, default=2.0, help="Rolling window length in seconds (default 2.0)")
-    parser.add_argument("--assist-cooldown-s", type=float, default=5.0, help="Base cooldown between suggestions (default 5s)")
-    parser.add_argument("--assist-auto-accept", action="store_true", help="Auto-accept suggestions (testing)")
-    parser.add_argument("--assist-verbose", action="store_true", help="Verbose console logging for assist")
+    # Assist CLI removed for logging-only approach
 
     return parser
 
