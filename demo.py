@@ -27,7 +27,7 @@ from assist.objects import ObjectsTracker
 from assist.orchestrator import AssistOrchestrator
 
 
-def run(sim, robot, controller: CartesianVelocityJogController, simulation_app, *, mux_input: CommandMuxInputProvider | None, obj_tracker: ObjectsTracker | None, session_logger: SessionLogWriter | None, tick_cfg: TickLoggingConfig | None):
+def run(sim, robot, controller: CartesianVelocityJogController, simulation_app, *, mux_input: CommandMuxInputProvider | None, obj_tracker: ObjectsTracker | None, session_logger: SessionLogWriter | None, tick_cfg: TickLoggingConfig | None, id_to_label: dict[str, str] | None = None):
     dt = sim.get_physics_dt()
     controller.reset(robot)
     accum = 0.0
@@ -45,9 +45,15 @@ def run(sim, robot, controller: CartesianVelocityJogController, simulation_app, 
                 objs_raw = []
                 try:
                     for o in obj_tracker.snapshot():
+                        lbl = o.label
+                        if id_to_label is not None:
+                            try:
+                                lbl = id_to_label.get(o.id, o.label)
+                            except Exception:
+                                lbl = o.label
                         objs_raw.append({
                             "id": o.id,
-                            "label": o.label,
+                            "label": lbl,
                             "pose": {"position_m": list(o.pose.position_m), "orientation_wxyz": list(o.pose.orientation_wxyz)},
                             "confidence": o.confidence,
                         })
@@ -94,6 +100,7 @@ def main():
 
     # Spawn objects from Nucleus YCB
     spawned_paths = []
+    id_to_label: dict[str, str] = {}
     if not args_cli.no_objects:
         # Resolve YCB path
         try:
@@ -118,6 +125,12 @@ def main():
         
         loader = ObjectLoader(loader_cfg)
         spawned_paths = loader.spawn(parent_prim_path="/World/Origin1", num_objects=int(args_cli.num_objects))
+        # Build id->label mapping from prim path->label (use basename of prim path as id)
+        try:
+            prim_to_label = loader.get_last_spawn_labels()
+            id_to_label = {str(p).split("/")[-1]: str(lbl) for p, lbl in prim_to_label.items()}
+        except Exception:
+            id_to_label = {}
 
     # Reset simulation
     sim.reset()
@@ -193,7 +206,7 @@ def main():
         mode_manager.set_mode_change_callback(_on_mode_change)
 
     print("[INFO]: Setup complete... (Mode keys: F/f/1=translate, R/r/2=rotate, G/g/3=gripper)")
-    run(sim, robot, controller, simulation_app, mux_input=mux_input, obj_tracker=tracker, session_logger=session_logger, tick_cfg=tick_cfg)
+    run(sim, robot, controller, simulation_app, mux_input=mux_input, obj_tracker=tracker, session_logger=session_logger, tick_cfg=tick_cfg, id_to_label=id_to_label)
     simulation_app.close()
 
 

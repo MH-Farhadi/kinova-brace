@@ -3,6 +3,7 @@ from __future__ import annotations
 import random
 import math
 import importlib
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, Sequence
@@ -64,6 +65,16 @@ class ObjectLoader:
         self._usd_file_paths: list[str] = self._collect_usd_files(cfg.dataset_dirs)
         if len(self._usd_file_paths) == 0:
             raise FileNotFoundError(f"No .usd files found in dataset_dirs={cfg.dataset_dirs}.")
+        # Map of spawned prim path -> human-readable label (derived from USD filename)
+        self._last_spawn_label_map: dict[str, str] = {}
+
+    def get_last_spawn_labels(self) -> dict[str, str]:
+        """Return a copy of the last spawn's mapping from prim path to label.
+
+        Labels are derived from the spawned USD file's basename (without extension).
+        Returns an empty dict if nothing has been spawned yet.
+        """
+        return dict(self._last_spawn_label_map)
 
     @staticmethod
     def _collect_usd_files(dirs: Iterable[str]) -> list[str]:
@@ -304,6 +315,9 @@ class ObjectLoader:
         orientation = self._compute_orientation()
         spawned_prim_paths: list[str] = []
 
+        # Reset label map for this spawn call
+        self._last_spawn_label_map = {}
+
         for idx, (usd_path, pos) in enumerate(zip(selection, positions), start=1):
             # Configure spawn with optional scaling
             scale_arg = None
@@ -324,6 +338,20 @@ class ObjectLoader:
                 usd_cfg.visual_material = preview
 
             prim_path = f"{objects_root}/Obj_{idx:02d}"
+            # Derive a readable label from the USD filename (works for local paths and Nucleus URLs)
+            try:
+                base_name = str(usd_path).rstrip("/").split("/")[-1]
+                lower_name = base_name.lower()
+                raw = base_name
+                for ext in (".usd", ".usda", ".usdc", ".usdz"):
+                    if lower_name.endswith(ext):
+                        raw = base_name[: -len(ext)]
+                        break
+                # Strip leading numeric id prefixes like "037_" or "005-"
+                simplified = re.sub(r"^\d+[_-]+", "", raw)
+                label = simplified
+            except Exception:
+                label = f"Obj_{idx:02d}"
             
             try:
                 # Spawn object
@@ -337,6 +365,7 @@ class ObjectLoader:
                     self._ensure_object_physics(prim_path)
                 
                 spawned_prim_paths.append(prim_path)
+                self._last_spawn_label_map[prim_path] = label
                 
             except Exception:
                 continue  # Skip failed spawns silently
