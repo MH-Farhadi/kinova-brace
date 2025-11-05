@@ -40,6 +40,8 @@ def add_demo_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParse
     parser.add_argument("--ee-frame", type=str, default="world", choices=["world", "base"], help="EE logging frame")
     parser.add_argument("--print-interval", type=int, default=1, help="Print every N steps")
 
+    # Assist CLI removed for logging-only approach
+
     return parser
 
 

@@ -46,3 +46,24 @@ class Se3KeyboardInput(InputProvider):
                 self._kb.add_callback(k, gripper_fn)    # type: ignore[attr-defined]
         except Exception:
             print("[WARN]: Failed to add keyboard mode callbacks") 
+
+    def add_dialogue_callbacks(self, yes_fn: Callable, no_fn: Callable, choose1_fn: Callable | None = None, choose2_fn: Callable | None = None) -> None:
+        """Add dialogue callbacks for Yes/No and A/B choices.
+        
+        Keys: Y/N for accept/decline, A/B or 1/2 for clarify choices.
+        """
+        try:
+            for k in ["Y", "y"]:
+                self._kb.add_callback(k, yes_fn)  # type: ignore[attr-defined]
+            for k in ["N", "n"]:
+                self._kb.add_callback(k, no_fn)   # type: ignore[attr-defined]
+            if choose1_fn is not None:
+                self._kb.add_callback("1", choose1_fn)  # type: ignore[attr-defined]
+                self._kb.add_callback("A", choose1_fn)  # type: ignore[attr-defined]
+                self._kb.add_callback("a", choose1_fn)  # type: ignore[attr-defined]
+            if choose2_fn is not None:
+                self._kb.add_callback("2", choose2_fn)  # type: ignore[attr-defined]
+                self._kb.add_callback("B", choose2_fn)  # type: ignore[attr-defined]
+                self._kb.add_callback("b", choose2_fn)  # type: ignore[attr-defined]
+        except Exception:
+            print("[WARN]: Failed to add dialogue callbacks")

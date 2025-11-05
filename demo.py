@@ -18,15 +18,42 @@ from controllers import (
     Se3KeyboardInput,
     ModeManager,
 )
+from assist.input_mux import CommandMuxInputProvider
+from assist.objects import ObjectsTracker
+from assist.logger import SessionLogWriter, TickLoggingConfig
+from assist.config import AssistConfig, from_cli_args
+from assist.input_mux import CommandMuxInputProvider
+from assist.objects import ObjectsTracker
+from assist.orchestrator import AssistOrchestrator
 
 
-def run(sim, robot, controller: CartesianVelocityJogController, simulation_app):
+def run(sim, robot, controller: CartesianVelocityJogController, simulation_app, *, mux_input: CommandMuxInputProvider | None, obj_tracker: ObjectsTracker | None, session_logger: SessionLogWriter | None, tick_cfg: TickLoggingConfig | None):
     dt = sim.get_physics_dt()
     controller.reset(robot)
+    accum = 0.0
     while simulation_app.is_running():
         controller.step(robot, dt)
         sim.step()
         robot.update(dt)
+        # Logging-only tick at configured rate
+        if session_logger is not None and obj_tracker is not None and tick_cfg is not None and mux_input is not None:
+            accum += dt
+            period = 1.0 / float(tick_cfg.log_rate_hz)
+            if accum + 1e-9 >= period:
+                accum = 0.0
+                # Build object dict list for logging from tracker snapshot
+                objs_raw = []
+                try:
+                    for o in obj_tracker.snapshot():
+                        objs_raw.append({
+                            "id": o.id,
+                            "label": o.label,
+                            "pose": {"position_m": list(o.pose.position_m), "orientation_wxyz": list(o.pose.orientation_wxyz)},
+                            "confidence": o.confidence,
+                        })
+                except Exception as e:
+                    print(f"[LOG] Object snapshot failed: {e}")
+                session_logger.write_tick(robot=robot, controller=controller, objects=objs_raw, last_user_cmd=mux_input.last_cmd, cfg=tick_cfg)
 
 
 def main():
@@ -66,6 +93,7 @@ def main():
     robot = scene_entities["kinova_j2n6s300"]
 
     # Spawn objects from Nucleus YCB
+    spawned_paths = []
     if not args_cli.no_objects:
         # Resolve YCB path
         try:
@@ -120,18 +148,52 @@ def main():
     mode_manager.set_mode_change_callback(lambda mode: controller.set_mode(mode.value))
     controller.set_mode("translate")
 
+    # Logging-only setup
+    prim_paths = spawned_paths if not args_cli.no_objects and 'spawned_paths' in locals() else []
+    tracker = ObjectsTracker(prim_paths=prim_paths)
+    mux_input = CommandMuxInputProvider()
+    controller.set_input_provider(mux_input)
+
+    # Session logger
+    tick_cfg = TickLoggingConfig(
+        log_rate_hz=10,
+        workspace_min=getattr(controller.config.safety_cfg, 'workspace_min', None),
+        workspace_max=getattr(controller.config.safety_cfg, 'workspace_max', None),
+        ee_link_name=str(args_cli.ee_link),
+        arm_joint_regex=controller.config.arm_joint_regex,
+    )
+    session_logger = SessionLogWriter(root=Path("logs/assist"))
+    # Write metadata.json
+    session_logger.write_metadata(
+        sim_dt=sim.get_physics_dt(),
+        physics_substeps=int(getattr(sim.cfg, 'sub_steps', 4)),
+        seed=0,
+        robot_name="kinova_j2n6s300",
+        ee_link=str(args_cli.ee_link),
+        arm_joint_regex=controller.config.arm_joint_regex,
+        log_rate_hz=tick_cfg.log_rate_hz,
+        window_len_s=2.0,
+    )
+
     if not args_cli.headless:
         keyboard = Se3KeyboardInput(
             pos_sensitivity_per_step=ctrl_cfg.linear_speed_mps * sim.get_physics_dt(),
             rot_sensitivity_rad_per_step=float(args_cli.rot_speed) * sim.get_physics_dt(),
         )
-        controller.set_input_provider(keyboard)
-        
+        mux_input.set_base(keyboard)
         translate_fn, rotate_fn, gripper_fn = mode_manager.get_mode_callbacks()
         keyboard.add_mode_callbacks(translate_fn, rotate_fn, gripper_fn)
+        # Log mode changes
+        def _on_mode_change(m):
+            controller.set_mode(m.value)
+            try:
+                session_logger.log_event("mode_change", {"from": "unknown", "to": str(m)})
+            except Exception:
+                pass
+        mode_manager.set_mode_change_callback(_on_mode_change)
 
     print("[INFO]: Setup complete... (Mode keys: F/f/1=translate, R/r/2=rotate, G/g/3=gripper)")
-    run(sim, robot, controller, simulation_app)
+    run(sim, robot, controller, simulation_app, mux_input=mux_input, obj_tracker=tracker, session_logger=session_logger, tick_cfg=tick_cfg)
     simulation_app.close()
 
 
