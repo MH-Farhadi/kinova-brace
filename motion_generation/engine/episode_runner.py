@@ -139,6 +139,7 @@ class EpisodeRunner:
         target_label_res = str(target.get("label", "")) if target is not None else ""
         if target is None:
             return EpisodeOutcome(False, "no_target", target_id, target_label_res)
+        print(f"[MG][EP] Selected target id={target_id} label='{target_label_res}'")
 
         # Build waypoints in base frame using AABB-based grasp estimation
         # Reconstruct full prim path from tracker by matching trailing id
@@ -154,6 +155,7 @@ class EpisodeRunner:
             grasp_pos_w, _ = compute_object_topdown_grasp_pose_w(prim_path=prim_path)
             pos_w = torch.tensor(grasp_pos_w, dtype=torch.float32, device=self.sim.device)
         else:
+            print("[MG][EP][WARN] Could not resolve prim path for target; falling back to reported pose.")
             pos_w = torch.tensor(target["pose"].position_m, dtype=torch.float32, device=self.sim.device)
         pos_b = self._world_to_base(pos_w)
         waypoints = generate_waypoints_base(
