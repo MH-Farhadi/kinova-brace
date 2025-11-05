@@ -10,8 +10,7 @@ from isaaclab.utils.math import subtract_frame_transforms
 
 from controllers import CartesianVelocityJogController, CartesianVelocityJogConfig
 from ..config import RunConfig
-from ..engine.controllers import WaypointFollowerInput
-from ..engine.waypoints import generate_waypoints_base
+from motion_generation.engine.controllers import WaypointFollowerInput
 from ..samplers.grasp_estimation import compute_object_topdown_grasp_pose_w
 from assist.logger import SessionLogWriter, TickLoggingConfig
 from assist.objects import ObjectsTracker
@@ -53,6 +52,30 @@ class EpisodeRunner:
         step_pos = float(self.controller.config.linear_speed_mps) * dt
         self.input = WaypointFollowerInput(step_pos_m=step_pos, tol_m=self.cfg.planner.tolerance_m, device=str(self.sim.device))
         self.controller.set_input_provider(self.input)
+        # Planner setup (scripted / rmpflow / curobo)
+        try:
+            import importlib
+            planners_mod = importlib.import_module("motion_generation.engine.planners")
+            PlannerContext = getattr(planners_mod, "PlannerContext")
+            create_planner = getattr(planners_mod, "create_planner")
+            cfg_dir = str((__import__("pathlib").Path(__file__).resolve().parents[1] / "motion_generation_config").resolve())
+            ctx = PlannerContext(
+                base_frame="base_link",
+                ee_link_name=str(self.controller.config.ee_link_name),
+                urdf_path=None,
+                config_dir=cfg_dir,
+            )
+            self.planner = create_planner(self.cfg.planner.type, ctx=ctx)
+        except Exception as e:
+            print(f"[MG][PLANNER][WARN] Failed to load planner module, using scripted fallback: {e}")
+            class _LocalScripted:
+                def plan_waypoints_b(self, *, target_pos_b, pregrasp_offset_m, grasp_depth_m, lift_height_m):
+                    x, y, z = float(target_pos_b[0]), float(target_pos_b[1]), float(target_pos_b[2])
+                    pre = (x, y, z + float(pregrasp_offset_m))
+                    grasp = (x, y, z + float(grasp_depth_m))
+                    lift = (x, y, z + float(lift_height_m))
+                    return [pre, grasp, lift]
+            self.planner = _LocalScripted()
 
     def _read_ee_pose_b(self) -> torch.Tensor:
         body_ids, _ = self.robot.find_bodies([self.controller.config.ee_link_name])
@@ -158,7 +181,7 @@ class EpisodeRunner:
             print("[MG][EP][WARN] Could not resolve prim path for target; falling back to reported pose.")
             pos_w = torch.tensor(target["pose"].position_m, dtype=torch.float32, device=self.sim.device)
         pos_b = self._world_to_base(pos_w)
-        waypoints = generate_waypoints_base(
+        waypoints = self.planner.plan_waypoints_b(
             target_pos_b=(float(pos_b[0]), float(pos_b[1]), float(pos_b[2])),
             pregrasp_offset_m=self.cfg.task.pregrasp_offset_m,
             grasp_depth_m=self.cfg.task.grasp_depth_m,
