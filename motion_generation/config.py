@@ -9,6 +9,7 @@ class EpisodeConfig:
     num_episodes: int = 10
     max_steps_per_phase: int = 400
     timeout_s: float = 30.0
+    settle_time_s: float = 1.0
 
 
 @dataclass

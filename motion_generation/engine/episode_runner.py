@@ -146,6 +146,18 @@ class EpisodeRunner:
         self.input.reset()
         self.controller.set_mode("translate")
 
+        # Physics settle period to allow newly spawned objects to stabilize
+        settle_time_s = float(getattr(self.cfg.episode, "settle_time_s", 0.0))
+        settle_steps = int(max(0.0, settle_time_s) / dt)
+        if settle_steps > 0:
+            print(f"[MG][EP] Settling physics: time_s={settle_time_s:.3f} dt={dt:.4f} steps={settle_steps}")
+            for _ in range(settle_steps):
+                # Keep pose; run controller for gravity compensation and holds
+                self.controller.step(self.robot, dt)
+                self.sim.step()
+                self.robot.update(dt)
+            print("[MG][EP] Settle complete.")
+
         # Snapshot objects and pick target
         objs = []
         try:
@@ -167,18 +179,32 @@ class EpisodeRunner:
         # Build waypoints in base frame using AABB-based grasp estimation
         # Reconstruct full prim path from tracker by matching trailing id
         prim_path = None
-        try:
-            for p in getattr(self.tracker, "prim_paths", []):
-                if p.endswith("/" + target_id):
-                    prim_path = p
+        tracker_paths = getattr(self.tracker, "prim_paths", [])
+        print(f"[MG][EP] Tracker prim_paths count={len(tracker_paths)}; attempting id match for '{target_id}'")
+        for p in tracker_paths:
+            if p.endswith("/" + target_id):
+                prim_path = p
+                print(f"[MG][EP] Resolved prim_path from tracker: {prim_path}")
+                break
+        if prim_path is None:
+            # Fallback: scan USD stage for any prim ending with this target id
+            print(f"[MG][EP] No tracker match. Scanning USD stage for prim ending with '/{target_id}'...")
+            import importlib
+            omni_usd = importlib.import_module("omni.usd")
+            stage = omni_usd.get_context().get_stage()  # type: ignore[attr-defined]
+            for prim in stage.Traverse():
+                path_str = prim.GetPath().pathString
+                if path_str.endswith("/" + target_id):
+                    prim_path = path_str
+                    print(f"[MG][EP] Resolved prim_path from USD stage: {prim_path}")
                     break
-        except Exception:
-            prim_path = None
+
         if prim_path is not None:
+            print(f"[MG][EP] Using prim_path='{prim_path}' for AABB top grasp position.")
             grasp_pos_w, _ = compute_object_topdown_grasp_pose_w(prim_path=prim_path)
             pos_w = torch.tensor(grasp_pos_w, dtype=torch.float32, device=self.sim.device)
         else:
-            print("[MG][EP][WARN] Could not resolve prim path for target; falling back to reported pose.")
+            print("[MG][EP][ERROR] Failed to resolve prim_path; using reported object pose center instead (not top-of-AABB).")
             pos_w = torch.tensor(target["pose"].position_m, dtype=torch.float32, device=self.sim.device)
         pos_b = self._world_to_base(pos_w)
         waypoints = self.planner.plan_waypoints_b(
