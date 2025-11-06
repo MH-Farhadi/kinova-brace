@@ -1,9 +1,7 @@
 from __future__ import annotations
 
 import argparse
-from pathlib import Path
-import sys
-from typing import Optional, Tuple
+from typing import Optional
 
 from isaaclab.app import AppLauncher
 
@@ -20,18 +18,25 @@ def add_cli_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--speed", type=float, default=0.20)
     parser.add_argument("--tolerance", type=float, default=0.005)
     parser.add_argument("--logs-root", type=str, default="logs/assist")
-    parser.add_argument("--planner", type=str, default="scripted", choices=["scripted", "rmpflow", "curobo"], help="Planner to demo")
+    parser.add_argument(
+        "--planner",
+        type=str,
+        default="scripted",
+        choices=["scripted", "rmpflow", "curobo"],
+        help="Planner backend to use during data collection.",
+    )
     AppLauncher.add_app_launcher_args(parser)
 
 
 def main(argv: Optional[list[str]] = None) -> int:
-    parser = argparse.ArgumentParser(description="Scripted reach-to-grasp data collection")
+    parser = argparse.ArgumentParser(description="Data collection using motion_generation planners")
     add_cli_args(parser)
     args = parser.parse_args(argv)
 
-    # Delegate to planner demo, which sets up sim and runs episodes using selected planner
-    from .demo import run_motion_planner_demo
-    return run_motion_planner_demo(args)
+    # Delegate to data collection demo
+    from .demo import run_data_collection
+
+    return run_data_collection(args)
 
 
 if __name__ == "__main__":
