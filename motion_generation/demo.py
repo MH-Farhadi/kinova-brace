@@ -20,7 +20,7 @@ from controllers import (
 from assist.logger import TickLoggingConfig
 from assist.objects import ObjectsTracker
 
-from motion_generation.config import RunConfig, EpisodeConfig, TaskConfig, PlannerConfig, ObjectsConfig, LoggingConfig
+from motion_generation.config import RunConfig, EpisodeConfig, TaskConfig, PlannerConfig, ObjectsConfig, LoggingConfig, GraspConfig
 
 
 def run_motion_planner_demo(args: argparse.Namespace) -> int:
@@ -130,10 +130,18 @@ def run_motion_planner_demo(args: argparse.Namespace) -> int:
     tracker = ObjectsTracker(prim_paths=prim_paths)
 
     # Run config
+    # Default Replicator YAML if not provided and grasp provider is enabled
+    default_rep_yaml = str((Path(__file__).resolve().parent / "motion_generation_config" / "gripper_configs" / "j2n6s300_topdown.yaml").resolve())
+
     run_cfg = RunConfig(
         episode=EpisodeConfig(num_episodes=int(args.num_episodes)),
         task=TaskConfig(target_label=getattr(args, "target_label", None), pregrasp_offset_m=float(getattr(args, "pregrasp", 0.10)), lift_height_m=float(getattr(args, "lift", 0.15))),
         planner=PlannerConfig(type=str(getattr(args, "planner", "scripted")), linear_speed_mps=float(getattr(args, "speed", 0.7)), tolerance_m=float(getattr(args, "tolerance", 0.005))),
+        grasp=GraspConfig(
+            type=str(getattr(args, "grasp", "aabb")),
+            rep_gripper_prim_path=getattr(args, "rep_gripper_prim_path", None),
+            rep_config_yaml_path=getattr(args, "rep_config_yaml", default_rep_yaml if str(getattr(args, "grasp", "aabb")) == "replicator" else None),
+        ),
         objects=ObjectsConfig(dataset_dirs=dataset_dirs, num_objects=int(args.num_objects), spawn_min_xyz=tuple(args.spawn_min), spawn_max_xyz=tuple(args.spawn_max)),
         logging=LoggingConfig(logs_root=str(getattr(args, "logs_root", "logs/assist"))),
     )

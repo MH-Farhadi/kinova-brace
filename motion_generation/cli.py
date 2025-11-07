@@ -7,6 +7,11 @@ from typing import Optional, Tuple
 
 from isaaclab.app import AppLauncher
 
+# Allow running as a script: ensure package root on sys.path
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.append(str(ROOT))
+
 
 def add_cli_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--num-episodes", type=int, default=10)
@@ -21,6 +26,10 @@ def add_cli_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--tolerance", type=float, default=0.005)
     parser.add_argument("--logs-root", type=str, default="logs/assist")
     parser.add_argument("--planner", type=str, default="scripted", choices=["scripted", "rmpflow", "curobo"], help="Planner to demo")
+    # Grasp provider options
+    parser.add_argument("--grasp", type=str, default="aabb", choices=["aabb", "replicator"], help="Grasp pose provider")
+    parser.add_argument("--rep-gripper-prim-path", type=str, default=None, help="Gripper prim path for Replicator grasping")
+    parser.add_argument("--rep-config-yaml", type=str, default=None, help="Replicator grasping YAML config path")
     AppLauncher.add_app_launcher_args(parser)
 
 
@@ -30,7 +39,12 @@ def main(argv: Optional[list[str]] = None) -> int:
     args = parser.parse_args(argv)
 
     # Delegate to planner demo, which sets up sim and runs episodes using selected planner
-    from .demo import run_motion_planner_demo
+    try:
+        # If invoked as a module
+        from .demo import run_motion_planner_demo  # type: ignore[no-redef]
+    except Exception:
+        # If invoked as a script
+        from motion_generation.demo import run_motion_planner_demo  # type: ignore[no-redef]
     return run_motion_planner_demo(args)
 
 

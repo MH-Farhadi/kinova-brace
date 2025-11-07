@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Optional, Tuple, List
+from typing import Optional, Tuple, List, Dict, Any
 
 
 @dataclass
@@ -30,6 +30,16 @@ class PlannerConfig:
 
 
 @dataclass
+class GraspConfig:
+    type: str = "aabb"  # "aabb" | "replicator"
+    # Replicator-specific options:
+    rep_gripper_prim_path: Optional[str] = None
+    rep_config_yaml_path: Optional[str] = None
+    rep_sampler_config: Optional[Dict[str, Any]] = None
+    rep_max_candidates: int = 16
+
+
+@dataclass
 class ObjectsConfig:
     dataset_dirs: List[str] = field(default_factory=list)
     num_objects: int = 1
@@ -52,6 +62,7 @@ class RunConfig:
     episode: EpisodeConfig = field(default_factory=EpisodeConfig)
     task: TaskConfig = field(default_factory=TaskConfig)
     planner: PlannerConfig = field(default_factory=PlannerConfig)
+    grasp: GraspConfig = field(default_factory=GraspConfig)
     objects: ObjectsConfig = field(default_factory=ObjectsConfig)
     logging: LoggingConfig = field(default_factory=LoggingConfig)
 

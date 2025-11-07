@@ -11,7 +11,7 @@ from isaaclab.utils.math import subtract_frame_transforms
 from controllers import CartesianVelocityJogController, CartesianVelocityJogConfig
 from ..config import RunConfig
 from motion_generation.engine.controllers import WaypointFollowerInput
-from ..samplers.grasp_estimation import compute_object_topdown_grasp_pose_w
+from motion_generation.samplers.grasp_estimation import compute_object_topdown_grasp_pose_w
 from assist.logger import SessionLogWriter, TickLoggingConfig
 from assist.objects import ObjectsTracker
 
@@ -47,11 +47,19 @@ class EpisodeRunner:
         self.tracker = tracker
         self.id_to_label = id_to_label
         self.cfg = run_cfg
+        # Robot prim path for grasp providers needing gripper reference
+        self.robot_prim_path: Optional[str] = None
+        try:
+            self.robot_prim_path = str(getattr(getattr(robot, "cfg", None), "prim_path", None))
+        except Exception:
+            self.robot_prim_path = None
         # Input provider setup
         dt = float(self.sim.get_physics_dt())
         step_pos = float(self.controller.config.linear_speed_mps) * dt
         self.input = WaypointFollowerInput(step_pos_m=step_pos, tol_m=self.cfg.planner.tolerance_m, device=str(self.sim.device))
         self.controller.set_input_provider(self.input)
+        # Grasp provider setup
+        self._grasp_provider = self._create_grasp_provider()
         # Planner setup (scripted / rmpflow / curobo)
         try:
             import importlib
@@ -76,6 +84,33 @@ class EpisodeRunner:
                     lift = (x, y, z + float(lift_height_m))
                     return [pre, grasp, lift]
             self.planner = _LocalScripted()
+
+    def _create_grasp_provider(self):
+        """Create grasp pose provider based on config."""
+        kind = (getattr(self.cfg, "grasp", None) and getattr(self.cfg.grasp, "type", "aabb")) or "aabb"
+        kind_l = str(kind).lower()
+        if kind_l == "replicator":
+            try:
+                import importlib
+                grasping_mod = importlib.import_module("motion_generation.engine.grasping")
+                gp = getattr(grasping_mod, "ReplicatorGraspProvider")(
+                    gripper_prim_path=getattr(self.cfg.grasp, "rep_gripper_prim_path", self.robot_prim_path),
+                    config_yaml_path=getattr(self.cfg.grasp, "rep_config_yaml_path", None),
+                    sampler_config=getattr(self.cfg.grasp, "rep_sampler_config", None),
+                    max_candidates=int(getattr(self.cfg.grasp, "rep_max_candidates", 16)),
+                )
+                print("[MG][EP] Grasp provider: ReplicatorGraspProvider")
+                return gp
+            except Exception as e:
+                print(f"[MG][EP][WARN] Replicator grasp provider unavailable ({e}); falling back to AABB.")
+        # AABB provider (no external deps beyond USD)
+        class _AabbTopProvider:
+            def __init__(self, compute_fn):
+                self._compute = compute_fn
+            def get_grasp_pose_w(self, *, object_prim_path: str, robot_prim_path: Optional[str]):
+                return self._compute(prim_path=object_prim_path)
+        print("[MG][EP] Grasp provider: AabbTop (built-in)")
+        return _AabbTopProvider(compute_object_topdown_grasp_pose_w)
 
     def _read_ee_pose_b(self) -> torch.Tensor:
         body_ids, _ = self.robot.find_bodies([self.controller.config.ee_link_name])
@@ -200,8 +235,10 @@ class EpisodeRunner:
                     break
 
         if prim_path is not None:
-            print(f"[MG][EP] Using prim_path='{prim_path}' for AABB top grasp position.")
-            grasp_pos_w, _ = compute_object_topdown_grasp_pose_w(prim_path=prim_path)
+            print(f"[MG][EP] Using prim_path='{prim_path}' for grasp pose.")
+            # Obtain 6D grasp pose from provider (may use Replicator or AABB heuristic)
+            grasp_pos_w, grasp_quat_wxyz = self._grasp_provider.get_grasp_pose_w(object_prim_path=prim_path, robot_prim_path=self.robot_prim_path)
+            print(f"[MG][EP] Grasp pose (w): pos={grasp_pos_w} quat(wxyz)={grasp_quat_wxyz}")
             pos_w = torch.tensor(grasp_pos_w, dtype=torch.float32, device=self.sim.device)
         else:
             print("[MG][EP][ERROR] Failed to resolve prim_path; using reported object pose center instead (not top-of-AABB).")
