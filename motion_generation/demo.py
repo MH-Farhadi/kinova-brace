@@ -27,6 +27,25 @@ def run_motion_planner_demo(args: argparse.Namespace) -> int:
     app_launcher = AppLauncher(args)
     simulation_app = app_launcher.app
 
+    # Ensure LULA/Motion Generation extensions are enabled so --planner lula works
+    try:
+        import omni.kit.app  # type: ignore
+        app = omni.kit.app.get_app()
+        ext = app.get_extension_manager()
+        for ext_name in [
+            "omni.isaac.motion_generation",
+            "omni.isaac.motion_planning.lula",
+            "omni.isaac.motion_generation.lula",
+        ]:
+            try:
+                if not ext.is_extension_enabled(ext_name):
+                    ext.set_extension_enabled_immediate(ext_name, True)
+                    print(f"[MG][EXT] Enabled extension: {ext_name}")
+            except Exception:
+                pass
+    except Exception as e:
+        print(f"[MG][EXT][WARN] Could not enable LULA extensions automatically: {e}")
+
     # Import Isaac/scene modules that require an active Omniverse app
     import isaaclab.sim as sim_utils
     from environments.reach_to_grasp.utils import design_scene
