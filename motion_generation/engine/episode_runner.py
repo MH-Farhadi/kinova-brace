@@ -244,12 +244,43 @@ class EpisodeRunner:
             print("[MG][EP][ERROR] Failed to resolve prim_path; using reported object pose center instead (not top-of-AABB).")
             pos_w = torch.tensor(target["pose"].position_m, dtype=torch.float32, device=self.sim.device)
         pos_b = self._world_to_base(pos_w)
-        waypoints = self.planner.plan_waypoints_b(
-            target_pos_b=(float(pos_b[0]), float(pos_b[1]), float(pos_b[2])),
-            pregrasp_offset_m=self.cfg.task.pregrasp_offset_m,
-            grasp_depth_m=self.cfg.task.grasp_depth_m,
-            lift_height_m=self.cfg.task.lift_height_m,
-        )
+        # Convert grasp quaternion to base frame if available
+        target_quat_b = None
+        try:
+            from isaaclab.utils.math import quat_conjugate, quat_multiply  # type: ignore
+            base_quat_w = self.robot.data.root_pose_w[0, 3:7]
+            base_quat_inv = quat_conjugate(base_quat_w)
+            q_w = torch.tensor(grasp_quat_wxyz, dtype=torch.float32, device=self.sim.device)
+            qb = quat_multiply(base_quat_inv, q_w)
+            target_quat_b = (float(qb[0]), float(qb[1]), float(qb[2]), float(qb[3]))
+        except Exception:
+            target_quat_b = None
+            print("[MG][EP][WARN] Could not compute base-frame grasp orientation; proceeding with position-only plan.")
+        # Prefer 6D planning when available
+        if hasattr(self.planner, "plan_to_pose_b"):
+            try:
+                waypoints = self.planner.plan_to_pose_b(
+                    target_pos_b=(float(pos_b[0]), float(pos_b[1]), float(pos_b[2])),
+                    target_quat_b_wxyz=target_quat_b,
+                    pregrasp_offset_m=self.cfg.task.pregrasp_offset_m,
+                    grasp_depth_m=self.cfg.task.grasp_depth_m,
+                    lift_height_m=self.cfg.task.lift_height_m,
+                )
+            except Exception as e:
+                print(f"[MG][EP][WARN] plan_to_pose_b failed ({e}); using position-only waypoints.")
+                waypoints = self.planner.plan_waypoints_b(
+                    target_pos_b=(float(pos_b[0]), float(pos_b[1]), float(pos_b[2])),
+                    pregrasp_offset_m=self.cfg.task.pregrasp_offset_m,
+                    grasp_depth_m=self.cfg.task.grasp_depth_m,
+                    lift_height_m=self.cfg.task.lift_height_m,
+                )
+        else:
+            waypoints = self.planner.plan_waypoints_b(
+                target_pos_b=(float(pos_b[0]), float(pos_b[1]), float(pos_b[2])),
+                pregrasp_offset_m=self.cfg.task.pregrasp_offset_m,
+                grasp_depth_m=self.cfg.task.grasp_depth_m,
+                lift_height_m=self.cfg.task.lift_height_m,
+            )
         # First phase: approach only to pregrasp and grasp (exclude lift)
         self.input.set_waypoints_b(waypoints[:2])
 
