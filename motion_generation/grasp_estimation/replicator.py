@@ -1,27 +1,8 @@
 from __future__ import annotations
 
-from typing import Optional, Tuple, Any, List
+from typing import Optional, Tuple, Any
 
-
-class GraspPoseProvider:
-    """Abstract provider for grasp pose generation in world frame."""
-
-    def get_grasp_pose_w(self, *, object_prim_path: str, robot_prim_path: Optional[str]) -> Tuple[Tuple[float, float, float], Tuple[float, float, float, float]]:
-        raise NotImplementedError
-
-
-class AabbTopGraspProvider(GraspPoseProvider):
-    """Compute grasp pose using world AABB: position at top center, identity orientation."""
-
-    def __init__(self) -> None:
-        # Lazy import to avoid USD deps during module import
-        from ..samplers.grasp_estimation import compute_object_topdown_grasp_pose_w  # noqa: WPS433
-
-        self._compute = compute_object_topdown_grasp_pose_w
-
-    def get_grasp_pose_w(self, *, object_prim_path: str, robot_prim_path: Optional[str]) -> Tuple[Tuple[float, float, float], Tuple[float, float, float, float]]:
-        pos, quat = self._compute(prim_path=object_prim_path)
-        return pos, quat
+from .base import GraspPoseProvider
 
 
 class ReplicatorGraspProvider(GraspPoseProvider):
@@ -296,6 +277,5 @@ class ReplicatorGraspProvider(GraspPoseProvider):
                 print(f"[MG][GRASP][REP][ERROR] Unsupported grasp pose type={type(pose)} (no introspection)")
             raise RuntimeError("[MG][GRASP][REP] Unsupported grasp pose format returned.")
         return conv
-
 
 

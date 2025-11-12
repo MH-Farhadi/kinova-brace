@@ -10,7 +10,7 @@ from isaaclab.utils.math import subtract_frame_transforms
 
 from controllers import CartesianVelocityJogController, CartesianVelocityJogConfig
 from ..config import RunConfig
-from ..engine.controllers import WaypointFollowerInput
+from controllers.input.waypoint_follower import WaypointFollowerInput
 from ..engine.waypoints import generate_waypoints_base
 from ..samplers.grasp_estimation import compute_object_topdown_grasp_pose_w
 from assist.logger import SessionLogWriter, TickLoggingConfig

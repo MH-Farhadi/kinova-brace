@@ -1,7 +1,9 @@
 from __future__ import annotations
 
-from typing import Tuple
+from typing import Tuple, Optional
 import importlib
+
+from .base import GraspPoseProvider
 
 
 def compute_object_topdown_grasp_pose_w(*, prim_path: str) -> Tuple[Tuple[float, float, float], Tuple[float, float, float, float]]:
@@ -42,5 +44,16 @@ def compute_object_topdown_grasp_pose_w(*, prim_path: str) -> Tuple[Tuple[float,
     # Keep current EE orientation unchanged by returning identity here
     quat_wxyz = (1.0, 0.0, 0.0, 0.0)
     return pos, quat_wxyz
+
+
+class AabbTopGraspProvider(GraspPoseProvider):
+    """Compute grasp pose using world AABB: position at top center, identity orientation."""
+
+    def __init__(self) -> None:
+        self._compute = compute_object_topdown_grasp_pose_w
+
+    def get_grasp_pose_w(self, *, object_prim_path: str, robot_prim_path: Optional[str]) -> Tuple[Tuple[float, float, float], Tuple[float, float, float, float]]:
+        pos, quat = self._compute(prim_path=object_prim_path)
+        return pos, quat
 
 
