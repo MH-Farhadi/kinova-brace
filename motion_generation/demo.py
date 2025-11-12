@@ -19,7 +19,7 @@ from controllers import (  # noqa: E402
 )
 from motion_generation.planners import PlannerContext, create_planner  # noqa: E402
 from controllers.input.waypoint_follower import WaypointFollowerInput  # noqa: E402
-from motion_generation.grasp_estimation.aabb import compute_object_topdown_grasp_pose_w  # noqa: E402
+from motion_generation.grasp_estimation.aabb import compute_object_topdown_grasp_pose_w, compute_object_xy_extents_w  # noqa: E402
 from motion_generation.grasp_estimation.replicator import ReplicatorGraspProvider  # noqa: E402
 
 
@@ -92,6 +92,16 @@ def _world_to_base_quat(sim, robot, quat_wxyz_w: Optional[Tuple[float, float, fl
         return (float(qb[0]), float(qb[1]), float(qb[2]), float(qb[3]))
     except Exception:
         return None
+
+
+def _yaw_from_quat_wxyz(q: Tuple[float, float, float, float]) -> float:
+    """Return yaw (rotation around Z) from quaternion (w,x,y,z)."""
+    import math
+    w, x, y, z = float(q[0]), float(q[1]), float(q[2]), float(q[3])
+    # yaw = atan2(2(wz + xy), 1 - 2(y^2 + z^2))
+    s1 = 2.0 * (w * z + x * y)
+    c1 = 1.0 - 2.0 * (y * y + z * z)
+    return math.atan2(s1, c1)
 
 
 def run_grasp_loop_demo(args: argparse.Namespace) -> int:
@@ -198,6 +208,7 @@ def run_grasp_loop_demo(args: argparse.Namespace) -> int:
     pregrasp = float(getattr(args, "pregrasp", 0.10))
     lift_h = float(getattr(args, "lift", 0.15))
     tolerance_m = float(getattr(args, "tolerance", 0.005))
+    planner_kind = str(getattr(args, "planner", "scripted")).lower()
 
     print(f"[MG] Starting grasp loop: episodes={num_episodes} grasp={grasp_kind} planner={getattr(args, 'planner', 'scripted')}")
     successes = 0
@@ -251,28 +262,6 @@ def run_grasp_loop_demo(args: argparse.Namespace) -> int:
         quat_b = _world_to_base_quat(sim, robot, quat_wxyz_w)
         print(f"[MG][EP] Grasp pose (base): pos={pos_b} quat_b(wxyz)={quat_b}")
 
-        # Plan waypoints
-        try:
-            if hasattr(planner, "plan_to_pose_b"):
-                waypoints: List[Tuple[float, float, float]] = getattr(planner, "plan_to_pose_b")(
-                    target_pos_b=pos_b,
-                    target_quat_b_wxyz=quat_b,
-                    pregrasp_offset_m=pregrasp,
-                    grasp_depth_m=0.00,
-                    lift_height_m=lift_h,
-                )
-            else:
-                raise RuntimeError("6D planning interface not available")
-        except Exception as e:
-            print(f"[MG][EP][WARN] plan_to_pose_b failed ({e}); using position-only waypoints.")
-            waypoints = planner.plan_waypoints_b(
-                target_pos_b=pos_b,
-                pregrasp_offset_m=pregrasp,
-                grasp_depth_m=0.00,
-                lift_height_m=lift_h,
-            )
-        print(f"[MG][EP] Waypoints: {waypoints}")
-
         # Controller phases
         dt = float(sim.get_physics_dt())
 
@@ -285,17 +274,93 @@ def run_grasp_loop_demo(args: argparse.Namespace) -> int:
             controller.step(robot, dt)
             sim.step(); robot.update(dt)
 
-        # Approach + grasp
-        controller.set_mode("translate")
-        inp.set_waypoints_b(waypoints[:2])
-        steps = 0
-        while True:
-            inp.set_current_pose_b(_ee_pos_b(robot, ctrl_cfg.ee_link_name))
-            controller.step(robot, dt)
-            sim.step(); robot.update(dt)
-            if len(inp._waypoints_b) == 0 or steps > 2000:
-                break
-            steps += 1
+        if planner_kind == "scripted":
+            # Phase 1: XY align at current Z
+            ee_b = _ee_pos_b(robot, ctrl_cfg.ee_link_name)
+            xy_align = (pos_b[0], pos_b[1], float(ee_b[2]))
+            controller.set_mode("translate")
+            inp.set_waypoints_b([xy_align])
+            steps = 0
+            while True:
+                inp.set_current_pose_b(_ee_pos_b(robot, ctrl_cfg.ee_link_name))
+                controller.step(robot, dt)
+                sim.step(); robot.update(dt)
+                if len(inp._waypoints_b) == 0 or steps > 2000:
+                    break
+                steps += 1
+
+            # Phase 2: Rotate yaw to align with smallest object width in XY
+            try:
+                import math
+                ex, ey = compute_object_xy_extents_w(prim_path=target_prim)
+                target_yaw = 0.0 if ex <= ey else (math.pi / 2.0)
+                # Current yaw in base frame
+                # Get current EE orientation in base frame
+                root_pose_w = robot.data.root_pose_w
+                ee_pose_w = robot.data.body_pose_w[:, int(robot.find_bodies([ctrl_cfg.ee_link_name])[0][0])]
+                from isaaclab.utils.math import subtract_frame_transforms  # type: ignore[attr-defined]
+                _, ee_quat_b = subtract_frame_transforms(
+                    root_pose_w[:, 0:3], root_pose_w[:, 3:7], ee_pose_w[:, 0:3], ee_pose_w[:, 3:7]
+                )
+                curr_yaw = _yaw_from_quat_wxyz((float(ee_quat_b[0,0]), float(ee_quat_b[0,1]), float(ee_quat_b[0,2]), float(ee_quat_b[0,3])))
+                dyaw = target_yaw - curr_yaw
+                # Wrap to [-pi, pi]
+                dyaw = (dyaw + math.pi) % (2.0 * math.pi) - math.pi
+                controller.set_mode("rotate")
+                # Distribute rotation over N steps
+                step_ang = 0.02
+                n_rot = max(1, int(abs(dyaw) / step_ang))
+                inp.queue_rotate_z(dyaw, n_rot)
+                for _ in range(n_rot):
+                    controller.step(robot, dt)
+                    sim.step(); robot.update(dt)
+            except Exception as e:
+                print(f"[MG][EP][WARN] Yaw alignment skipped: {e}")
+
+            # Phase 3: Descend straight down to target Z at aligned XY
+            controller.set_mode("translate")
+            descend = (pos_b[0], pos_b[1], pos_b[2])
+            inp.set_waypoints_b([descend])
+            steps = 0
+            while True:
+                inp.set_current_pose_b(_ee_pos_b(robot, ctrl_cfg.ee_link_name))
+                controller.step(robot, dt)
+                sim.step(); robot.update(dt)
+                if len(inp._waypoints_b) == 0 or steps > 2000:
+                    break
+                steps += 1
+        else:
+            # Planner-driven approach + grasp
+            try:
+                if hasattr(planner, "plan_to_pose_b"):
+                    waypoints: List[Tuple[float, float, float]] = getattr(planner, "plan_to_pose_b")(
+                        target_pos_b=pos_b,
+                        target_quat_b_wxyz=quat_b,
+                        pregrasp_offset_m=pregrasp,
+                        grasp_depth_m=0.00,
+                        lift_height_m=lift_h,
+                    )
+                else:
+                    raise RuntimeError("6D planning interface not available")
+            except Exception as e:
+                print(f"[MG][EP][WARN] plan_to_pose_b failed ({e}); using position-only waypoints.")
+                waypoints = planner.plan_waypoints_b(
+                    target_pos_b=pos_b,
+                    pregrasp_offset_m=pregrasp,
+                    grasp_depth_m=0.00,
+                    lift_height_m=lift_h,
+                )
+            print(f"[MG][EP] Waypoints: {waypoints}")
+            controller.set_mode("translate")
+            inp.set_waypoints_b(waypoints[:2])
+            steps = 0
+            while True:
+                inp.set_current_pose_b(_ee_pos_b(robot, ctrl_cfg.ee_link_name))
+                controller.step(robot, dt)
+                sim.step(); robot.update(dt)
+                if len(inp._waypoints_b) == 0 or steps > 2000:
+                    break
+                steps += 1
 
         # Close gripper
         controller.set_mode("gripper")
@@ -307,7 +372,8 @@ def run_grasp_loop_demo(args: argparse.Namespace) -> int:
 
         # Lift
         controller.set_mode("translate")
-        inp.set_waypoints_b([waypoints[-1]])
+        lift_pt = (pos_b[0], pos_b[1], pos_b[2] + lift_h)
+        inp.set_waypoints_b([lift_pt])
         steps = 0
         while True:
             inp.set_current_pose_b(_ee_pos_b(robot, ctrl_cfg.ee_link_name))

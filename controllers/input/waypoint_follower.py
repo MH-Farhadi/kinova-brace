@@ -31,6 +31,8 @@ class WaypointFollowerInput(InputProvider):
 		self._gripper_steps_left: int = 0
 		self._gripper_value: float = 0.0
 		self._last_cmd: Optional[torch.Tensor] = None
+		self._rot_steps_left: int = 0
+		self._rot_vec_b: torch.Tensor = torch.zeros(3, dtype=torch.float32, device=self.device)
 
 	def reset(self) -> None:
 		self._waypoints_b = []
@@ -52,6 +54,23 @@ class WaypointFollowerInput(InputProvider):
 		self._gripper_value = float(g_value)
 		self._gripper_steps_left = max(0, int(steps))
 
+	def queue_rotate_z(self, total_angle_rad: float, steps: int) -> None:
+		"""Queue a pure yaw rotation around base Z spread across 'steps' increments."""
+		steps = max(1, int(steps))
+		self._rot_steps_left = steps
+		increment = float(total_angle_rad) / float(steps)
+		self._rot_vec_b = torch.tensor([0.0, 0.0, increment], dtype=torch.float32, device=self.device)
+
+	def queue_rotate(self, rx: float, ry: float, rz: float, steps: int) -> None:
+		"""Queue an arbitrary rotation vector in base frame spread across 'steps' increments."""
+		steps = max(1, int(steps))
+		self._rot_steps_left = steps
+		self._rot_vec_b = torch.tensor(
+			[float(rx) / steps, float(ry) / steps, float(rz) / steps],
+			dtype=torch.float32,
+			device=self.device,
+		)
+
 	def advance(self) -> torch.Tensor:
 		# Priority: gripper commands
 		if self._gripper_steps_left > 0:
@@ -60,6 +79,14 @@ class WaypointFollowerInput(InputProvider):
 			cmd[0, 6] = float(self._gripper_value)
 			self._last_cmd = cmd
 			return cmd
+
+		# Second priority: queued rotation (used with controller in 'rotate' mode)
+		if self._rot_steps_left > 0:
+			self._rot_steps_left -= 1
+			cmd6 = torch.zeros(1, 6, dtype=torch.float32, device=self.device)
+			cmd6[0, 3:6] = self._rot_vec_b
+			self._last_cmd = cmd6
+			return cmd6
 
 		if self._current_ee_pos_b is None or len(self._waypoints_b) == 0:
 			cmd = torch.zeros(1, 6, dtype=torch.float32, device=self.device)

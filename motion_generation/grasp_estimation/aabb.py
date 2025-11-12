@@ -57,3 +57,24 @@ class AabbTopGraspProvider(GraspPoseProvider):
         return pos, quat
 
 
+def compute_object_xy_extents_w(*, prim_path: str) -> Tuple[float, float]:
+    """Return (extent_x, extent_y) in world from the object's AABB."""
+    try:
+        UsdGeom = importlib.import_module("pxr.UsdGeom")
+        omni_usd = importlib.import_module("omni.usd")  # type: ignore[attr-defined]
+    except Exception as e:
+        raise RuntimeError(f"[MG][GRASP] USD modules not available: {e}")
+    stage = omni_usd.get_context().get_stage()
+    prim = stage.GetPrimAtPath(prim_path)
+    if not prim.IsValid():
+        raise RuntimeError(f"[MG][GRASP] Invalid prim path for extents: {prim_path}")
+    bbox_cache = UsdGeom.BBoxCache(0.0, ["default"], useExtentsHint=True)
+    bbox = bbox_cache.ComputeWorldBound(prim)
+    rng = bbox.ComputeAlignedRange()
+    mn = rng.GetMin()
+    mx = rng.GetMax()
+    ex = float(mx[0] - mn[0])
+    ey = float(mx[1] - mn[1])
+    return ex, ey
+
+
