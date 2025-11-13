@@ -19,7 +19,7 @@ from controllers import (  # noqa: E402
 )
 from motion_generation.planners import PlannerContext, create_planner  # noqa: E402
 from controllers.input.waypoint_follower import WaypointFollowerInput  # noqa: E402
-from motion_generation.grasp_estimation.aabb import compute_object_topdown_grasp_pose_w, compute_object_xy_extents_w  # noqa: E402
+from motion_generation.grasp_estimation.aabb import AabbGraspPoseProvider  # noqa: E402
 from motion_generation.grasp_estimation.replicator import ReplicatorGraspProvider  # noqa: E402
 
 
@@ -179,6 +179,8 @@ def run_grasp_loop_demo(args: argparse.Namespace) -> int:
         except Exception as e:
             print(f"[MG][WARN] Replicator unavailable ({e}); falling back to AABB.")
             grasp_kind = "aabb"
+    if grasp_kind != "replicator" or grasp_provider is None:
+        grasp_provider = AabbGraspPoseProvider(align_to_min_width=True)
 
     # Object loader defaults
     dataset_dirs = [str(d) for d in getattr(args, "objects_dataset", [])]
@@ -251,10 +253,7 @@ def run_grasp_loop_demo(args: argparse.Namespace) -> int:
         print(f"[MG][EP] Target prim: {target_prim}")
 
         # Grasp pose (world)
-        if grasp_kind == "replicator" and grasp_provider is not None:
-            pos_w, quat_wxyz_w = grasp_provider.get_grasp_pose_w(object_prim_path=target_prim, robot_prim_path=robot_prim_path)
-        else:
-            pos_w, quat_wxyz_w = compute_object_topdown_grasp_pose_w(prim_path=target_prim)
+        pos_w, quat_wxyz_w = grasp_provider.get_grasp_pose_w(object_prim_path=target_prim, robot_prim_path=robot_prim_path)
         print(f"[MG][EP] Grasp pose (world): pos={pos_w} quat(wxyz)={quat_wxyz_w}")
 
         # Convert to base
@@ -289,11 +288,12 @@ def run_grasp_loop_demo(args: argparse.Namespace) -> int:
                     break
                 steps += 1
 
-            # Phase 2: Rotate yaw to align with smallest object width in XY
+            # Phase 2: Rotate yaw to align with target yaw (from grasp quaternion if available)
             try:
                 import math
-                ex, ey = compute_object_xy_extents_w(prim_path=target_prim)
-                target_yaw = 0.0 if ex <= ey else (math.pi / 2.0)
+                target_yaw = _yaw_from_quat_wxyz(quat_wxyz_w) if quat_wxyz_w is not None else None
+                if target_yaw is None:
+                    raise RuntimeError("target yaw unavailable")
                 # Current yaw in base frame
                 # Get current EE orientation in base frame
                 root_pose_w = robot.data.root_pose_w
