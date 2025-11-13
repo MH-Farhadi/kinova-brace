@@ -191,6 +191,24 @@ class ObjectLoader:
         dx, dy, dz = a[0] - b[0], a[1] - b[1], a[2] - b[2]
         return (dx * dx + dy * dy + dz * dz) ** 0.5
 
+    @staticmethod
+    def _quat_mul(q1: tuple[float, float, float, float], q2: tuple[float, float, float, float]) -> tuple[float, float, float, float]:
+        """Quaternion multiplication q = q1 * q2 in (w, x, y, z) format."""
+        w1, x1, y1, z1 = q1
+        w2, x2, y2, z2 = q2
+        return (
+            w1 * w2 - x1 * x2 - y1 * y2 - z1 * z2,
+            w1 * x2 + x1 * w2 + y1 * z2 - z1 * y2,
+            w1 * y2 - x1 * z2 + y1 * w2 + z1 * x2,
+            w1 * z2 + x1 * y2 - y1 * x2 + z1 * w2,
+        )
+
+    @staticmethod
+    def _yaw_quat(yaw_rad: float) -> tuple[float, float, float, float]:
+        """Quaternion for a pure Z-axis rotation by yaw_rad (radians)."""
+        half = 0.5 * yaw_rad
+        return (math.cos(half), 0.0, 0.0, math.sin(half))
+
     def _generate_positions(self, count: int) -> list[tuple[float, float, float]]:
         """Generate non-overlapping positions for objects."""
         positions: list[tuple[float, float, float]] = []
@@ -312,7 +330,7 @@ class ObjectLoader:
             selection = [random.choice(self._usd_file_paths) for _ in range(num_objects)]
 
         positions = self._generate_positions(len(selection))
-        orientation = self._compute_orientation()
+        base_orientation = self._compute_orientation()
         spawned_prim_paths: list[str] = []
 
         # Reset label map for this spawn call
@@ -354,11 +372,20 @@ class ObjectLoader:
                 label = f"Obj_{idx:02d}"
             
             try:
-                # Spawn object
-                if orientation is not None:
-                    usd_cfg.func(prim_path, usd_cfg, translation=pos, orientation=orientation)
+                # Per-object random yaw around Z to diversify object orientation
+                # This helps OBB-based grasp providers produce varied yaw even
+                # when assets share similar authored frames.
+                yaw_rad = random.uniform(-math.pi, math.pi)
+                yaw_quat = self._yaw_quat(yaw_rad)
+
+                if base_orientation is not None:
+                    # Combine configured orientation with random yaw
+                    orientation = self._quat_mul(yaw_quat, base_orientation)
                 else:
-                    usd_cfg.func(prim_path, usd_cfg, translation=pos)
+                    orientation = yaw_quat
+
+                # Spawn object
+                usd_cfg.func(prim_path, usd_cfg, translation=pos, orientation=orientation)
                 
                 # Ensure physics (silent fallback)
                 if self.cfg.enable_physics:

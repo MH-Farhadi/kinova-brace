@@ -36,7 +36,7 @@ def add_motion_gen_cli_args(parser: argparse.ArgumentParser) -> argparse.Argumen
                         help="Spawn AABB min xyz (m) relative to robot origin")
     parser.add_argument("--spawn-max", type=float, nargs=3, default=[0.55, 0.20, 0.05],
                         help="Spawn AABB max xyz (m) relative to robot origin")
-    parser.add_argument("--min-distance", type=float, default=0.1, help="Min distance between spawned objects (m)")
+    parser.add_argument("--min-distance", type=float, default=0.15, help="Min distance between spawned objects (m)")
     parser.add_argument("--scale-min", type=float, default=None, help="Optional uniform scale min for objects")
     parser.add_argument("--scale-max", type=float, default=None, help="Optional uniform scale max for objects")
     parser.add_argument("--no-objects", action="store_true", help="Skip spawning objects")
