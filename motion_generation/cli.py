@@ -43,7 +43,7 @@ def add_motion_gen_cli_args(parser: argparse.ArgumentParser) -> argparse.Argumen
     
     # Robot and controller configuration
     parser.add_argument("--ee-link", type=str, default="j2n6s300_end_effector", help="End-effector link name")
-    parser.add_argument("--speed", type=float, default=0.7, help="Linear speed (m/s)")
+    parser.add_argument("--speed", type=float, default=0.4, help="Linear speed (m/s)")
     parser.add_argument("--rot-speed", type=float, default=2.0, help="Angular speed (rad/s)")
     parser.add_argument("--tolerance", type=float, default=0.005, help="Position tolerance for waypoint reaching (m)")
     
@@ -66,7 +66,7 @@ def add_motion_gen_cli_args(parser: argparse.ArgumentParser) -> argparse.Argumen
                         help="Max grasp candidates for Replicator")
     
     # Physics stabilization
-    parser.add_argument("--stabilize-steps", type=int, default=120, 
+    parser.add_argument("--stabilize-steps", type=int, default=240, 
                         help="Simulation steps to wait after spawning for physics stabilization")
     
     # Logging and debugging

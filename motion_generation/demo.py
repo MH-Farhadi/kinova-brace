@@ -130,6 +130,7 @@ def run_grasp_loop_demo(args: argparse.Namespace) -> int:
         print(f"[MG] Using default YCB dataset: {dataset_dirs[0]}")
     else:
         print(f"[MG] Using custom object datasets: {dataset_dirs}")
+    
     phys_loader_kwargs = object_loader_kwargs_from_physix(phys)
     loader_cfg = ObjectLoaderConfig(
         dataset_dirs=dataset_dirs,
@@ -225,7 +226,7 @@ def run_grasp_loop_demo(args: argparse.Namespace) -> int:
                 inp.set_current_pose_b(get_ee_pos_base_frame(robot, ctrl_cfg.ee_link_name))
                 controller.step(robot, dt)
                 sim.step(); robot.update(dt)
-                if len(inp._waypoints_b) == 0 or steps > 2000:
+                if len(inp._waypoints_b) == 0 or steps > 1000:
                     break
                 steps += 1
 
@@ -268,7 +269,7 @@ def run_grasp_loop_demo(args: argparse.Namespace) -> int:
                 inp.set_current_pose_b(get_ee_pos_base_frame(robot, ctrl_cfg.ee_link_name))
                 controller.step(robot, dt)
                 sim.step(); robot.update(dt)
-                if len(inp._waypoints_b) == 0 or steps > 2000:
+                if len(inp._waypoints_b) == 0 or steps > 500:
                     break
                 steps += 1
         else:
