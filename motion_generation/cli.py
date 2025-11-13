@@ -27,7 +27,7 @@ def add_cli_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--logs-root", type=str, default="logs/assist")
     parser.add_argument("--planner", type=str, default="scripted", choices=["scripted", "rmpflow", "curobo", "lula"], help="Planner to demo")
     # Grasp provider options
-    parser.add_argument("--grasp", type=str, default="aabb", choices=["aabb", "replicator"], help="Grasp pose provider")
+    parser.add_argument("--grasp", type=str, default="obb", choices=["obb", "replicator"], help="Grasp pose provider")
     parser.add_argument("--rep-gripper-prim-path", type=str, default=None, help="Gripper prim path for Replicator grasping")
     parser.add_argument("--rep-config-yaml", type=str, default=None, help="Replicator grasping YAML config path")
     AppLauncher.add_app_launcher_args(parser)

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import importlib
 import sys
 from pathlib import Path
 from typing import List, Optional, Tuple
@@ -19,7 +20,6 @@ from controllers import (  # noqa: E402
 )
 from motion_generation.planners import PlannerContext, create_planner  # noqa: E402
 from controllers.input.waypoint_follower import WaypointFollowerInput  # noqa: E402
-from motion_generation.grasp_estimation.aabb import AabbGraspPoseProvider  # noqa: E402
 from motion_generation.grasp_estimation.replicator import ReplicatorGraspProvider  # noqa: E402
 
 
@@ -84,12 +84,16 @@ def _world_to_base_quat(sim, robot, quat_wxyz_w: Optional[Tuple[float, float, fl
     if quat_wxyz_w is None:
         return None
     try:
-        from isaaclab.utils.math import quat_conjugate, quat_multiply  # type: ignore[attr-defined]
-        base_quat_w = robot.data.root_pose_w[0, 3:7]
-        base_quat_inv = quat_conjugate(base_quat_w)
-        q_w = torch.tensor(quat_wxyz_w, dtype=torch.float32, device=sim.device)
-        qb = quat_multiply(base_quat_inv, q_w)
-        return (float(qb[0]), float(qb[1]), float(qb[2]), float(qb[3]))
+        # IsaacLab math utils operate on XYZW; our data is WXYZ. Convert, multiply, convert back.
+        from isaaclab.utils.math import quat_conjugate, quat_multiply, wxyz2xyzw, xyzw2wxyz  # type: ignore[attr-defined]
+        base_quat_wxyz = robot.data.root_pose_w[0, 3:7]  # (w,x,y,z)
+        base_quat_xyzw = wxyz2xyzw(base_quat_wxyz)
+        base_quat_inv_xyzw = quat_conjugate(base_quat_xyzw)
+        q_wxyz = torch.tensor(quat_wxyz_w, dtype=torch.float32, device=sim.device)
+        q_xyzw = wxyz2xyzw(q_wxyz)
+        qb_xyzw = quat_multiply(base_quat_inv_xyzw, q_xyzw)
+        qb_wxyz = xyzw2wxyz(qb_xyzw)
+        return (float(qb_wxyz[0]), float(qb_wxyz[1]), float(qb_wxyz[2]), float(qb_wxyz[3]))
     except Exception:
         return None
 
@@ -102,6 +106,35 @@ def _yaw_from_quat_wxyz(q: Tuple[float, float, float, float]) -> float:
     s1 = 2.0 * (w * z + x * y)
     c1 = 1.0 - 2.0 * (y * y + z * z)
     return math.atan2(s1, c1)
+
+
+def _stabilize_with_hold(sim, robot, controller, steps: int, dt: float) -> None:
+    """Step simulation while actively holding robot at current position.
+    
+    This ensures the robot maintains its position during object stabilization
+    by applying gravity compensation and position holding commands.
+    """
+    if steps <= 0:
+        return
+    
+    print(f"[MG] Stabilizing for {steps} steps while holding robot position...")
+    
+    # Store the current joint positions as targets
+    target_joint_pos = robot.data.joint_pos.clone()
+    
+    for _ in range(steps):
+        # Hold all joints at their current target positions
+        robot.set_joint_position_target(target_joint_pos)
+        robot.set_joint_velocity_target(torch.zeros_like(robot.data.joint_vel))
+        
+        # Apply gravity compensation to prevent sagging
+        gravity = robot.root_physx_view.get_gravity_compensation_forces()
+        robot.set_joint_effort_target(gravity)
+        
+        # Write commands and step simulation
+        robot.write_data_to_sim()
+        sim.step()
+        robot.update(dt)
 
 
 def run_grasp_loop_demo(args: argparse.Namespace) -> int:
@@ -164,7 +197,7 @@ def run_grasp_loop_demo(args: argparse.Namespace) -> int:
 
     # Grasp provider selection
     default_rep_yaml = str((Path(__file__).resolve().parent / "motion_generation_config" / "gripper_configs" / "j2n6s300_topdown.yaml").resolve())
-    grasp_kind = str(getattr(args, "grasp", "aabb")).lower()
+    grasp_kind = str(getattr(args, "grasp", "obb")).lower()
     rep_yaml = getattr(args, "rep_config_yaml", default_rep_yaml if grasp_kind == "replicator" else None)
     grasp_provider = None
     if grasp_kind == "replicator":
@@ -180,7 +213,15 @@ def run_grasp_loop_demo(args: argparse.Namespace) -> int:
             print(f"[MG][WARN] Replicator unavailable ({e}); falling back to AABB.")
             grasp_kind = "aabb"
     if grasp_kind != "replicator" or grasp_provider is None:
-        grasp_provider = AabbGraspPoseProvider(align_to_min_width=True)
+        try:
+            obb_mod = importlib.import_module("motion_generation.grasp_estimation.obb")
+            ProviderCls = getattr(obb_mod, "ObbGraspPoseProvider", None) or getattr(obb_mod, "OBBGraspPoseProvider", None)
+            if ProviderCls is None:
+                raise AttributeError("ObbGraspPoseProvider/OBBGraspPoseProvider not found")
+            grasp_provider = ProviderCls(align_to_min_width=True)
+            print("[MG] Grasp provider: OBB (minor-axis aligned)")
+        except Exception as e:
+            raise ImportError(f"[MG][ERROR] Failed to import OBB grasp provider: {e}")
 
     # Object loader defaults
     dataset_dirs = [str(d) for d in getattr(args, "objects_dataset", [])]
@@ -248,6 +289,14 @@ def run_grasp_loop_demo(args: argparse.Namespace) -> int:
             print("[MG][EP] No objects spawned; skipping episode.")
             continue
 
+        # Get physics timestep
+        dt = float(sim.get_physics_dt())
+
+        # Allow objects to stabilize while holding robot at start position
+        stabilize_steps = int(getattr(args, "stabilize_steps", 120))
+        if stabilize_steps > 0:
+            _stabilize_with_hold(sim, robot, controller, stabilize_steps, dt)
+
         # Select first object
         target_prim = prev_prim_paths[0]
         print(f"[MG][EP] Target prim: {target_prim}")
@@ -260,9 +309,6 @@ def run_grasp_loop_demo(args: argparse.Namespace) -> int:
         pos_b = _world_to_base_pos(sim, robot, pos_w)
         quat_b = _world_to_base_quat(sim, robot, quat_wxyz_w)
         print(f"[MG][EP] Grasp pose (base): pos={pos_b} quat_b(wxyz)={quat_b}")
-
-        # Controller phases
-        dt = float(sim.get_physics_dt())
 
         # Open gripper briefly
         controller.set_mode("gripper")
@@ -291,7 +337,8 @@ def run_grasp_loop_demo(args: argparse.Namespace) -> int:
             # Phase 2: Rotate yaw to align with target yaw (from grasp quaternion if available)
             try:
                 import math
-                target_yaw = _yaw_from_quat_wxyz(quat_wxyz_w) if quat_wxyz_w is not None else None
+                # Prefer target yaw in base frame
+                target_yaw = _yaw_from_quat_wxyz(quat_b) if quat_b is not None else (_yaw_from_quat_wxyz(quat_wxyz_w) if quat_wxyz_w is not None else None)
                 if target_yaw is None:
                     raise RuntimeError("target yaw unavailable")
                 # Current yaw in base frame
@@ -401,8 +448,9 @@ if __name__ == "__main__":
     ap.add_argument("--pregrasp", type=float, default=0.10)
     ap.add_argument("--lift", type=float, default=0.15)
     ap.add_argument("--tolerance", type=float, default=0.005)
+    ap.add_argument("--stabilize-steps", type=int, default=120, help="Number of sim steps to wait after spawning objects for physics to stabilize")
     ap.add_argument("--planner", type=str, default="scripted", choices=["scripted", "rmpflow", "curobo", "lula"])
-    ap.add_argument("--grasp", type=str, default="aabb", choices=["aabb", "replicator"])
+    ap.add_argument("--grasp", type=str, default="obb", choices=["obb", "replicator"])
     ap.add_argument("--rep-gripper-prim-path", type=str, default=None)
     ap.add_argument("--rep-config-yaml", type=str, default=None)
     AppLauncher.add_app_launcher_args(ap)
