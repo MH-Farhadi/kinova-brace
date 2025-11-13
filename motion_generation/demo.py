@@ -334,21 +334,11 @@ def run_grasp_loop_demo(args: argparse.Namespace) -> int:
 
 
 if __name__ == "__main__":
+    # Import CLI configuration from motion_generation.cli
+    from motion_generation.cli import add_motion_gen_cli_args
+    
     ap = argparse.ArgumentParser(description="Motion generation grasp loop demo")
-    # Reuse the stable demo CLI for spawn/object/controller settings
-    from scripts.cli import add_demo_cli_args
-    add_demo_cli_args(ap)
-    ap.add_argument("--num-episodes", type=int, default=3)
-    ap.add_argument("--objects-dataset", type=str, nargs="*", default=[])
-    ap.add_argument("--pregrasp", type=float, default=0.10)
-    ap.add_argument("--lift", type=float, default=0.15)
-    ap.add_argument("--tolerance", type=float, default=0.005)
-    ap.add_argument("--stabilize-steps", type=int, default=120, help="Number of sim steps to wait after spawning objects for physics to stabilize")
-    ap.add_argument("--planner", type=str, default="scripted", choices=["scripted", "rmpflow", "curobo", "lula"])
-    ap.add_argument("--grasp", type=str, default="obb", choices=["obb", "replicator"])
-    ap.add_argument("--rep-gripper-prim-path", type=str, default=None)
-    ap.add_argument("--rep-config-yaml", type=str, default=None)
-    AppLauncher.add_app_launcher_args(ap)
+    add_motion_gen_cli_args(ap)
     args_cli = ap.parse_args()
     raise SystemExit(run_grasp_loop_demo(args_cli))
 
