@@ -13,11 +13,14 @@ fetch the latest grasp pose for a given object label.
 """
 
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, TYPE_CHECKING
 
 from utils import world_to_base_pos, world_to_base_quat
 from .grasp_estimation.base import GraspPoseProvider
-from environments.object_loader import ObjectLoader
+
+if TYPE_CHECKING:
+    # Imported only for type checking; avoids importing heavy sim/omni deps at module import time.
+    from environments.object_loader import ObjectLoader
 
 
 @dataclass
@@ -29,7 +32,7 @@ class MotionGenerationAgent:
     controller: object
     planner: object
     grasp_provider: GraspPoseProvider
-    loader: ObjectLoader
+    loader: "ObjectLoader"
     robot_prim_path: Optional[str]
 
     def _label_map(self) -> Dict[str, str]:
@@ -104,5 +107,27 @@ class MotionGenerationAgent:
         quat_b = world_to_base_quat(self.sim, self.robot, quat_wxyz_w)
 
         return target_prim, pos_w, quat_wxyz_w, pos_b, quat_b
+
+    def compute_current_grasp_for_prim(
+        self,
+        prim_path: str,
+    ) -> Tuple[Tuple[float, float, float], Tuple[float, float, float, float], Tuple[float, float, float], Optional[Tuple[float, float, float, float]]]:
+        """Compute latest grasp pose for a specific prim path.
+
+        This is useful when the caller has already selected a target prim (e.g.
+        random choice from spawned objects) and simply wants the up-to-date
+        grasp pose in world and base frames.
+        """
+        # World-frame grasp pose from provider
+        pos_w, quat_wxyz_w = self.grasp_provider.get_grasp_pose_w(
+            object_prim_path=prim_path,
+            robot_prim_path=self.robot_prim_path,
+        )
+
+        # Convert to base frame
+        pos_b = world_to_base_pos(self.sim, self.robot, pos_w)
+        quat_b = world_to_base_quat(self.sim, self.robot, quat_wxyz_w)
+
+        return pos_w, quat_wxyz_w, pos_b, quat_b
 
 

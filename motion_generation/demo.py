@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import importlib
 import sys
+import random
 from pathlib import Path
 from typing import List, Tuple
 from isaaclab.app import AppLauncher
@@ -23,9 +24,6 @@ from utils import (
     enable_optional_planner_extensions,
     reset_robot_to_origin,
     get_ee_pos_base_frame,
-    world_to_base_pos,
-    world_to_base_quat,
-    yaw_from_quat_wxyz,
     stabilize_with_hold,
 )
 
@@ -140,14 +138,14 @@ def run_grasp_loop_demo(args: argparse.Namespace) -> int:
             else None
         ),
         include_labels=[
-            "banana",
+            # "banana",
             "bleach_cleanser",
             "bowl",
             "cracker_box",
-            "extra_large_clamp",
+            # "extra_large_clamp",
             "foam_brick",
             "gelatin_box",
-            "large_clamp",
+            # "large_clamp",
             # "large_marker",
             "master_chef_can",
             "mug",
@@ -229,12 +227,9 @@ def run_grasp_loop_demo(args: argparse.Namespace) -> int:
         if stabilize_steps > 0:
             stabilize_with_hold(sim, robot, stabilize_steps, dt)
 
-        # Select target object by label (if provided) and compute latest grasp pose
-        target_label = getattr(args, "target_label", None)
-        target_prim, pos_w, quat_wxyz_w, pos_b, quat_b = agent.compute_current_grasp_for_label(
-            label=target_label,
-            prim_paths=prev_prim_paths,
-        )
+        # Randomly select a target object from the spawned set and compute latest grasp pose
+        target_prim = random.choice(prev_prim_paths)
+        pos_w, quat_wxyz_w, pos_b, quat_b = agent.compute_current_grasp_for_prim(target_prim)
         print(f"[MG][EP] Target prim: {target_prim}")
         print(f"[MG][EP] Grasp pose (world): pos={pos_w} quat(wxyz)={quat_wxyz_w}")
         print(f"[MG][EP] Grasp pose (base): pos={pos_b} quat_b(wxyz)={quat_b}")
