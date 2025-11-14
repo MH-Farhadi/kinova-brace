@@ -223,7 +223,7 @@ def run_grasp_loop_demo(args: argparse.Namespace) -> int:
         dt = float(sim.get_physics_dt())
 
         # Allow objects to stabilize while holding robot at start position
-        stabilize_steps = int(getattr(args, "stabilize_steps", 120))
+        stabilize_steps = int(getattr(args, "stabilize_steps", 500))
         if stabilize_steps > 0:
             stabilize_with_hold(sim, robot, stabilize_steps, dt)
 
