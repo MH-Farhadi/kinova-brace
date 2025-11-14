@@ -4,24 +4,21 @@ import argparse
 import importlib
 import sys
 from pathlib import Path
-from typing import List, Optional, Tuple
-
-import torch
+from typing import List, Tuple
 from isaaclab.app import AppLauncher
 
-# Ensure project root on sys.path for modular imports
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.append(str(ROOT))
 
-from controllers import (  # noqa: E402
+from controllers import (  
     CartesianVelocityJogConfig,
     CartesianVelocityJogController,
 )
-from motion_generation.planners import PlannerContext, create_planner  # noqa: E402
-from controllers.input.waypoint_follower import WaypointFollowerInput  # noqa: E402
-from motion_generation.grasp_estimation.replicator import ReplicatorGraspProvider  # noqa: E402
-from utils import (  # noqa: E402
+from motion_generation.planners import PlannerContext, create_planner  
+from controllers.input.waypoint_follower import WaypointFollowerInput  
+from motion_generation.grasp_estimation.replicator import ReplicatorGraspProvider  
+from utils import (  
     enable_optional_planner_extensions,
     reset_robot_to_origin,
     get_ee_pos_base_frame,
@@ -136,7 +133,34 @@ def run_grasp_loop_demo(args: argparse.Namespace) -> int:
         dataset_dirs=dataset_dirs,
         bounds=SpawnBounds(min_xyz=tuple(args.spawn_min), max_xyz=tuple(args.spawn_max)),
         min_distance=float(getattr(args, "min_distance", 0.1)),
-        uniform_scale_range=((float(args.scale_min), float(args.scale_max)) if getattr(args, "scale_min", None) is not None and getattr(args, "scale_max", None) is not None else None),
+        uniform_scale_range=(
+            (float(args.scale_min), float(args.scale_max))
+            if getattr(args, "scale_min", None) is not None and getattr(args, "scale_max", None) is not None
+            else None
+        ),
+        include_labels=[
+            "banana",
+            "bleach_cleanser",
+            "bowl",
+            "cracker_box",
+            "extra_large_clamp",
+            "foam_brick",
+            "gelatin_box",
+            "large_clamp",
+            # "large_marker",
+            "master_chef_can",
+            "mug",
+            "mustard_bottle",
+            # "pitcher_base",
+            "potted_meat_can",
+            "power_drill",
+            "pudding_box",
+            # "scissors",
+            "sugar_box",
+            "tomato_soup_can",
+            "tuna_fish_can",
+            # "wood_block",
+        ],
         **phys_loader_kwargs,
     )
     loader = ObjectLoader(loader_cfg)
