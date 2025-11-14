@@ -37,6 +37,40 @@ class MotionGenerationAgent:
     robot_prim_path: Optional[str]
     tracker: Optional[ObjectsTracker] = None
 
+    def _live_pose_from_tracker(
+        self,
+        prim_path: str,
+    ) -> Optional[Tuple[Tuple[float, float, float], Tuple[float, float, float, float]]]:
+        """Return latest PhysX-based pose for the given prim, if tracker is available."""
+        if self.tracker is None:
+            return None
+        try:
+            snapshot = self.tracker.snapshot()
+        except Exception:
+            return None
+
+        target_id = prim_path.split("/")[-1]
+        for obj in snapshot:
+            obj_id = getattr(obj, "id", None)
+            if obj_id == target_id or obj_id == prim_path:
+                pose = getattr(obj, "pose", None)
+                if pose is None:
+                    continue
+                position = getattr(pose, "position_m", None)
+                orientation = getattr(pose, "orientation_wxyz", None)
+                if position is None or orientation is None:
+                    continue
+                return (
+                    (float(position[0]), float(position[1]), float(position[2])),
+                    (
+                        float(orientation[0]),
+                        float(orientation[1]),
+                        float(orientation[2]),
+                        float(orientation[3]),
+                    ),
+                )
+        return None
+
     def _label_map(self) -> Dict[str, str]:
         """Return prim_path -> label mapping for last spawn."""
         try:
@@ -98,98 +132,74 @@ class MotionGenerationAgent:
         if target_prim is None:
             raise RuntimeError("[MG][AGENT] No target prim available for grasp computation.")
 
+        # Optional: refine position using live PhysX pose (for sliding/drifting objects)
+        live_pose = self._live_pose_from_tracker(target_prim)
+
         # World-frame grasp pose from provider (e.g. OBB or Replicator)
-        pos_w, quat_wxyz_w = self.grasp_provider.get_grasp_pose_w(
+        pos_obb_w, quat_wxyz_w = self.grasp_provider.get_grasp_pose_w(
             object_prim_path=target_prim,
             robot_prim_path=self.robot_prim_path,
         )
 
+        if live_pose is not None:
+            pos_live_w, _ = live_pose
+            pos_w = (
+                float(pos_live_w[0]),
+                float(pos_live_w[1]),
+                float(pos_obb_w[2]),
+            )
+        else:
+            pos_w = pos_obb_w
+
         # Convert to base frame
-        pos_b = world_to_base_pos(self.sim, self.robot, pos_w)
-        quat_b = world_to_base_quat(self.sim, self.robot, quat_wxyz_w)
+        try:
+            pos_b = world_to_base_pos(self.sim, self.robot, pos_w)
+            quat_b = world_to_base_quat(self.sim, self.robot, quat_wxyz_w)
+        except Exception as e:
+            print(f"[MG][AGENT][WARN] world_to_base conversion failed ({e}); using world pose as base pose.")
+            pos_b = (float(pos_w[0]), float(pos_w[1]), float(pos_w[2]))
+            quat_b = None
 
         return target_prim, pos_w, quat_wxyz_w, pos_b, quat_b
-
-    def compute_scene_safe_z(
-        self,
-        prim_paths: List[str],
-        clearance: float = 0.05,
-    ) -> Optional[float]:
-        """Compute a safe Z height (in base frame) based on all objects in the scene.
-
-        Uses ObjectsTracker to read the latest PhysX poses for all provided prims
-        and returns max_z + clearance, where max_z is the maximum Z (in base frame)
-        among all tracked objects' grasp poses (top surface).
-
-        Args:
-            prim_paths: List of all object prim paths in the scene
-            clearance: Extra safety margin above the highest object (meters)
-
-        Returns:
-            Safe Z height in base frame, or None if no objects are trackable
-        """
-        if not prim_paths:
-            return None
-
-        # Lazily initialize or update tracker to cover all prims
-        if self.tracker is None:
-            self.tracker = ObjectsTracker(list(prim_paths))
-        else:
-            self.tracker.prim_paths = list(prim_paths)
-
-        max_z_b: Optional[float] = None
-        for prim_path in prim_paths:
-            try:
-                # Get grasp pose (top surface) for this object
-                pos_w, _ = self.grasp_provider.get_grasp_pose_w(
-                    object_prim_path=prim_path,
-                    robot_prim_path=self.robot_prim_path,
-                )
-                pos_b = world_to_base_pos(self.sim, self.robot, pos_w)
-                z_b = float(pos_b[2])
-                if max_z_b is None or z_b > max_z_b:
-                    max_z_b = z_b
-            except Exception:
-                continue
-
-        if max_z_b is None:
-            return None
-        return max_z_b + clearance
 
     def compute_current_grasp_for_prim(
         self,
         prim_path: str,
-        all_prim_paths: Optional[List[str]] = None,
-    ) -> Tuple[Tuple[float, float, float], Tuple[float, float, float, float], Tuple[float, float, float], Optional[Tuple[float, float, float, float]], Optional[float]]:
+    ) -> Tuple[Tuple[float, float, float], Tuple[float, float, float, float], Tuple[float, float, float], Optional[Tuple[float, float, float, float]]]:
         """Compute latest grasp pose for a specific prim path.
 
         This is useful when the caller has already selected a target prim (e.g.
         random choice from spawned objects) and simply wants the up-to-date
         grasp pose in world and base frames.
-
-        Args:
-            prim_path: The target object prim path
-            all_prim_paths: All spawned object prim paths (for computing safe Z)
-
-        Returns:
-            (pos_w, quat_wxyz_w, pos_b, quat_b, safe_z_b)
-            where safe_z_b is the scene-wide safe height in base frame or None
         """
-        # World-frame grasp pose from provider (uses current USD/PhysX state)
-        pos_w, quat_wxyz_w = self.grasp_provider.get_grasp_pose_w(
+        # Optional: refine position using live PhysX pose
+        live_pose = self._live_pose_from_tracker(prim_path)
+
+        # World-frame grasp pose from provider
+        pos_obb_w, quat_wxyz_w = self.grasp_provider.get_grasp_pose_w(
             object_prim_path=prim_path,
             robot_prim_path=self.robot_prim_path,
         )
 
+        if live_pose is not None:
+            pos_live_w, _ = live_pose
+            pos_w = (
+                float(pos_live_w[0]),
+                float(pos_live_w[1]),
+                float(pos_obb_w[2]),
+            )
+        else:
+            pos_w = pos_obb_w
+
         # Convert to base frame
-        pos_b = world_to_base_pos(self.sim, self.robot, pos_w)
-        quat_b = world_to_base_quat(self.sim, self.robot, quat_wxyz_w)
+        try:
+            pos_b = world_to_base_pos(self.sim, self.robot, pos_w)
+            quat_b = world_to_base_quat(self.sim, self.robot, quat_wxyz_w)
+        except Exception as e:
+            print(f"[MG][AGENT][WARN] world_to_base conversion failed ({e}); using world pose as base pose.")
+            pos_b = (float(pos_w[0]), float(pos_w[1]), float(pos_w[2]))
+            quat_b = None
 
-        # Compute scene-wide safe Z if all prim paths are provided
-        safe_z_b = None
-        if all_prim_paths:
-            safe_z_b = self.compute_scene_safe_z(all_prim_paths)
-
-        return pos_w, quat_wxyz_w, pos_b, quat_b, safe_z_b
+        return pos_w, quat_wxyz_w, pos_b, quat_b
 
 

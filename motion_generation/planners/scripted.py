@@ -35,30 +35,21 @@ class ScriptedPlanner(BasePlanner):
         dt: float,
         tolerance_m: float,
         inp,
-        scene_safe_z_b: Optional[float] = None,
     ) -> None:
         """Execute the scripted XY-align, yaw-rotate, and descend phases.
 
         This function centralizes the hard-coded scripted behavior so that the
         demo can remain thin and planner-agnostic.
-
-        Args:
-            scene_safe_z_b: Optional scene-wide safe Z height (in base frame) computed
-                from all objects in the scene. If provided, uses this instead of
-                computing safe_z locally from just the target object.
         """
         # Phase 1: Move up if needed, then XY align at a safe height above the object
         ee_b = get_ee_pos_base_frame(robot, ctrl_cfg.ee_link_name)
         ee_z = float(ee_b[2])
         top_z = float(grasp_pos_b[2])
 
-        # Determine safe Z: use scene-wide value if provided, otherwise compute locally
-        if scene_safe_z_b is not None:
-            safe_z = float(scene_safe_z_b)
-        else:
-            # Fallback: ensure EE is above the target object's top with clearance
-            clearance = 0.05
-            safe_z = max(ee_z, top_z + clearance)
+        # Ensure the end-effector is above the top of the object before XY alignment.
+        # Add a small clearance to avoid grazing the object while moving laterally.
+        clearance = 0.05
+        safe_z = max(ee_z, top_z + clearance)
 
         controller.set_mode("translate")
         waypoints_phase1 = []

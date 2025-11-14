@@ -26,7 +26,6 @@ from utils import (
     get_ee_pos_base_frame,
     stabilize_with_hold,
 )
-from utils.objects_tracker import ObjectsTracker
 
 
 def run_grasp_loop_demo(args: argparse.Namespace) -> int:
@@ -166,7 +165,6 @@ def run_grasp_loop_demo(args: argparse.Namespace) -> int:
     loader = ObjectLoader(loader_cfg)
 
     # High-level motion generation helper for label-based target selection and grasp queries
-    # Tracker will be lazily initialized per episode when objects are spawned
     agent = MotionGenerationAgent(
         sim=sim,
         robot=robot,
@@ -175,7 +173,6 @@ def run_grasp_loop_demo(args: argparse.Namespace) -> int:
         grasp_provider=grasp_provider,
         loader=loader,
         robot_prim_path=robot_prim_path,
-        tracker=None,  # Will be created lazily when computing safe Z
     )
 
     # Loop
@@ -231,16 +228,11 @@ def run_grasp_loop_demo(args: argparse.Namespace) -> int:
             stabilize_with_hold(sim, robot, stabilize_steps, dt)
 
         # Randomly select a target object from the spawned set and compute latest grasp pose
-        # Also compute scene-wide safe Z from all objects
         target_prim = random.choice(prev_prim_paths)
-        pos_w, quat_wxyz_w, pos_b, quat_b, safe_z_b = agent.compute_current_grasp_for_prim(
-            target_prim,
-            all_prim_paths=prev_prim_paths,
-        )
+        pos_w, quat_wxyz_w, pos_b, quat_b = agent.compute_current_grasp_for_prim(target_prim)
         print(f"[MG][EP] Target prim: {target_prim}")
         print(f"[MG][EP] Grasp pose (world): pos={pos_w} quat(wxyz)={quat_wxyz_w}")
         print(f"[MG][EP] Grasp pose (base): pos={pos_b} quat_b(wxyz)={quat_b}")
-        print(f"[MG][EP] Scene safe Z (base): {safe_z_b}")
 
         # Open gripper briefly
         controller.set_mode("gripper")
@@ -272,7 +264,6 @@ def run_grasp_loop_demo(args: argparse.Namespace) -> int:
                 dt=dt,
                 tolerance_m=tolerance_m,
                 inp=inp,
-                scene_safe_z_b=safe_z_b,  # Use scene-wide safe Z from all objects
             )
         else:
             # Planner-driven approach + grasp
