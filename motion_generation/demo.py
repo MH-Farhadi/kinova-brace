@@ -18,6 +18,7 @@ from controllers import (
 from motion_generation.planners import PlannerContext, create_planner  
 from controllers.input.waypoint_follower import WaypointFollowerInput  
 from motion_generation.grasp_estimation.replicator import ReplicatorGraspProvider  
+from motion_generation.mogen import MotionGenerationAgent
 from utils import (  
     enable_optional_planner_extensions,
     reset_robot_to_origin,
@@ -103,7 +104,7 @@ def run_grasp_loop_demo(args: argparse.Namespace) -> int:
             print("[MG] Grasp provider: Replicator")
         except Exception as e:
             print(f"[MG][WARN] Replicator unavailable ({e}); falling back to AABB.")
-            grasp_kind = "aabb"
+            grasp_kind = "obb"
     if grasp_kind != "replicator" or grasp_provider is None:
         try:
             obb_mod = importlib.import_module("motion_generation.grasp_estimation.obb")
@@ -165,6 +166,17 @@ def run_grasp_loop_demo(args: argparse.Namespace) -> int:
     )
     loader = ObjectLoader(loader_cfg)
 
+    # High-level motion generation helper for label-based target selection and grasp queries
+    agent = MotionGenerationAgent(
+        sim=sim,
+        robot=robot,
+        controller=controller,
+        planner=planner,
+        grasp_provider=grasp_provider,
+        loader=loader,
+        robot_prim_path=robot_prim_path,
+    )
+
     # Loop
     prev_prim_paths: List[str] = []
     num_episodes = int(getattr(args, "num_episodes", 3))
@@ -217,17 +229,14 @@ def run_grasp_loop_demo(args: argparse.Namespace) -> int:
         if stabilize_steps > 0:
             stabilize_with_hold(sim, robot, stabilize_steps, dt)
 
-        # Select first object
-        target_prim = prev_prim_paths[0]
+        # Select target object by label (if provided) and compute latest grasp pose
+        target_label = getattr(args, "target_label", None)
+        target_prim, pos_w, quat_wxyz_w, pos_b, quat_b = agent.compute_current_grasp_for_label(
+            label=target_label,
+            prim_paths=prev_prim_paths,
+        )
         print(f"[MG][EP] Target prim: {target_prim}")
-
-        # Grasp pose (world)
-        pos_w, quat_wxyz_w = grasp_provider.get_grasp_pose_w(object_prim_path=target_prim, robot_prim_path=robot_prim_path)
         print(f"[MG][EP] Grasp pose (world): pos={pos_w} quat(wxyz)={quat_wxyz_w}")
-
-        # Convert to base
-        pos_b = world_to_base_pos(sim, robot, pos_w)
-        quat_b = world_to_base_quat(sim, robot, quat_wxyz_w)
         print(f"[MG][EP] Grasp pose (base): pos={pos_b} quat_b(wxyz)={quat_b}")
 
         # Open gripper briefly
