@@ -16,7 +16,6 @@ from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple, TYPE_CHECKING
 
 from utils import world_to_base_pos, world_to_base_quat
-from utils.objects_tracker import ObjectsTracker
 from .grasp_estimation.base import GraspPoseProvider
 
 if TYPE_CHECKING:
@@ -35,41 +34,6 @@ class MotionGenerationAgent:
     grasp_provider: GraspPoseProvider
     loader: "ObjectLoader"
     robot_prim_path: Optional[str]
-    tracker: Optional[ObjectsTracker] = None
-
-    def _live_pose_from_tracker(
-        self,
-        prim_path: str,
-    ) -> Optional[Tuple[Tuple[float, float, float], Tuple[float, float, float, float]]]:
-        """Return latest PhysX-based pose for the given prim, if tracker is available."""
-        if self.tracker is None:
-            return None
-        try:
-            snapshot = self.tracker.snapshot()
-        except Exception:
-            return None
-
-        target_id = prim_path.split("/")[-1]
-        for obj in snapshot:
-            obj_id = getattr(obj, "id", None)
-            if obj_id == target_id or obj_id == prim_path:
-                pose = getattr(obj, "pose", None)
-                if pose is None:
-                    continue
-                position = getattr(pose, "position_m", None)
-                orientation = getattr(pose, "orientation_wxyz", None)
-                if position is None or orientation is None:
-                    continue
-                return (
-                    (float(position[0]), float(position[1]), float(position[2])),
-                    (
-                        float(orientation[0]),
-                        float(orientation[1]),
-                        float(orientation[2]),
-                        float(orientation[3]),
-                    ),
-                )
-        return None
 
     def _label_map(self) -> Dict[str, str]:
         """Return prim_path -> label mapping for last spawn."""
@@ -132,33 +96,15 @@ class MotionGenerationAgent:
         if target_prim is None:
             raise RuntimeError("[MG][AGENT] No target prim available for grasp computation.")
 
-        # Optional: refine position using live PhysX pose (for sliding/drifting objects)
-        live_pose = self._live_pose_from_tracker(target_prim)
-
         # World-frame grasp pose from provider (e.g. OBB or Replicator)
-        pos_obb_w, quat_wxyz_w = self.grasp_provider.get_grasp_pose_w(
+        pos_w, quat_wxyz_w = self.grasp_provider.get_grasp_pose_w(
             object_prim_path=target_prim,
             robot_prim_path=self.robot_prim_path,
         )
 
-        if live_pose is not None:
-            pos_live_w, _ = live_pose
-            pos_w = (
-                float(pos_live_w[0]),
-                float(pos_live_w[1]),
-                float(pos_obb_w[2]),
-            )
-        else:
-            pos_w = pos_obb_w
-
         # Convert to base frame
-        try:
-            pos_b = world_to_base_pos(self.sim, self.robot, pos_w)
-            quat_b = world_to_base_quat(self.sim, self.robot, quat_wxyz_w)
-        except Exception as e:
-            print(f"[MG][AGENT][WARN] world_to_base conversion failed ({e}); using world pose as base pose.")
-            pos_b = (float(pos_w[0]), float(pos_w[1]), float(pos_w[2]))
-            quat_b = None
+        pos_b = world_to_base_pos(self.sim, self.robot, pos_w)
+        quat_b = world_to_base_quat(self.sim, self.robot, quat_wxyz_w)
 
         return target_prim, pos_w, quat_wxyz_w, pos_b, quat_b
 
@@ -172,33 +118,15 @@ class MotionGenerationAgent:
         random choice from spawned objects) and simply wants the up-to-date
         grasp pose in world and base frames.
         """
-        # Optional: refine position using live PhysX pose
-        live_pose = self._live_pose_from_tracker(prim_path)
-
         # World-frame grasp pose from provider
-        pos_obb_w, quat_wxyz_w = self.grasp_provider.get_grasp_pose_w(
+        pos_w, quat_wxyz_w = self.grasp_provider.get_grasp_pose_w(
             object_prim_path=prim_path,
             robot_prim_path=self.robot_prim_path,
         )
 
-        if live_pose is not None:
-            pos_live_w, _ = live_pose
-            pos_w = (
-                float(pos_live_w[0]),
-                float(pos_live_w[1]),
-                float(pos_obb_w[2]),
-            )
-        else:
-            pos_w = pos_obb_w
-
         # Convert to base frame
-        try:
-            pos_b = world_to_base_pos(self.sim, self.robot, pos_w)
-            quat_b = world_to_base_quat(self.sim, self.robot, quat_wxyz_w)
-        except Exception as e:
-            print(f"[MG][AGENT][WARN] world_to_base conversion failed ({e}); using world pose as base pose.")
-            pos_b = (float(pos_w[0]), float(pos_w[1]), float(pos_w[2]))
-            quat_b = None
+        pos_b = world_to_base_pos(self.sim, self.robot, pos_w)
+        quat_b = world_to_base_quat(self.sim, self.robot, quat_wxyz_w)
 
         return pos_w, quat_wxyz_w, pos_b, quat_b
 
