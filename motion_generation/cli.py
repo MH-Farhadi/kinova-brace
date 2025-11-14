@@ -66,7 +66,7 @@ def add_motion_gen_cli_args(parser: argparse.ArgumentParser) -> argparse.Argumen
                         help="Max grasp candidates for Replicator")
     
     # Physics stabilization
-    parser.add_argument("--stabilize-steps", type=int, default=240, 
+    parser.add_argument("--stabilize-steps", type=int, default=500, 
                         help="Simulation steps to wait after spawning for physics stabilization")
     
     # Logging and debugging
