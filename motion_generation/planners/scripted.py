@@ -35,20 +35,55 @@ class ScriptedPlanner(BasePlanner):
         dt: float,
         tolerance_m: float,
         inp,
+        scene_safe_z_b: Optional[float] = None,
     ) -> None:
         """Execute the scripted XY-align, yaw-rotate, and descend phases.
 
         This function centralizes the hard-coded scripted behavior so that the
         demo can remain thin and planner-agnostic.
+
+        Args:
+            scene_safe_z_b: Optional scene-wide safe Z height (in base frame) computed
+                from all objects in the scene. If provided, uses this instead of
+                computing safe_z locally from just the target object.
         """
-        # Phase 1: XY align at current Z
+        # Phase 1: Move up if needed, then XY align at a safe height above the object
         ee_b = get_ee_pos_base_frame(robot, ctrl_cfg.ee_link_name)
-        xy_align = (grasp_pos_b[0], grasp_pos_b[1], float(ee_b[2]))
+        ee_z = float(ee_b[2])
+        top_z = float(grasp_pos_b[2])
+
+        # Determine safe Z: use scene-wide value if provided, otherwise compute locally
+        if scene_safe_z_b is not None:
+            safe_z = float(scene_safe_z_b)
+        else:
+            # Fallback: ensure EE is above the target object's top with clearance
+            clearance = 0.05
+            safe_z = max(ee_z, top_z + clearance)
+
         controller.set_mode("translate")
-        inp.set_waypoints_b([xy_align])
+        waypoints_phase1 = []
+        # If current EE height is below the safe height, go straight up first.
+        print(f"[MG][EP][INFO] ee_z: {ee_z}, top_z: {top_z}, safe_z: {safe_z}")
+        if ee_z < safe_z:
+            waypoints_phase1.append((float(ee_b[0]), float(ee_b[1]), safe_z))
+        # Then align XY at the safe height above the object.
+        waypoints_phase1.append((float(grasp_pos_b[0]), float(grasp_pos_b[1]), safe_z))
+
+        inp.set_waypoints_b(waypoints_phase1)
         steps = 0
         while True:
-            inp.set_current_pose_b(get_ee_pos_base_frame(robot, ctrl_cfg.ee_link_name))
+            # Continuously enforce safe_z: if EE dips below safe_z due to arm kinematics,
+            # insert a corrective waypoint to first move back up to safe_z, then continue XY alignment.
+            ee_b = get_ee_pos_base_frame(robot, ctrl_cfg.ee_link_name)
+            ee_z = float(ee_b[2])
+            if ee_z < safe_z - 1e-3:
+                controller.set_mode("translate")
+                inp.set_waypoints_b([
+                    (float(ee_b[0]), float(ee_b[1]), safe_z),
+                    (float(grasp_pos_b[0]), float(grasp_pos_b[1]), safe_z),
+                ])
+
+            inp.set_current_pose_b(ee_b)
             controller.step(robot, dt)
             sim.step()
             robot.update(dt)
