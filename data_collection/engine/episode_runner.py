@@ -9,12 +9,12 @@ import isaaclab.sim as sim_utils
 from isaaclab.utils.math import subtract_frame_transforms
 
 from controllers import CartesianVelocityJogController, CartesianVelocityJogConfig
-from ..config import RunConfig
+from data_collection.config import RunConfig
 from controllers.input.waypoint_follower import WaypointFollowerInput
-from ..engine.waypoints import generate_waypoints_base
+from data_collection.engine.waypoints import generate_waypoints_base
 import importlib
-from assist.logger import SessionLogWriter, TickLoggingConfig
-from assist.objects import ObjectsTracker
+from data_collection.core.logger import SessionLogWriter, TickLoggingConfig
+from data_collection.core.objects import ObjectsTracker
 
 
 @dataclass

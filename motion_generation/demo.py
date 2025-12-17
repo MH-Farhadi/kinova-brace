@@ -39,8 +39,8 @@ def run_grasp_loop_demo(args: argparse.Namespace) -> int:
     import isaaclab.sim as sim_utils
     from environments.reach_to_grasp.utils import design_scene
     from environments.reach_to_grasp.config import DEFAULT_SCENE, DEFAULT_CAMERA
-    from environments.object_loader import ObjectLoader, ObjectLoaderConfig, SpawnBounds
-    from environments.physix import PhysicsConfig, apply_to_simulation_cfg, object_loader_kwargs_from_physix
+    from environments.utils.object_loader import ObjectLoader, ObjectLoaderConfig, SpawnBounds
+    from environments.utils.physix import PhysicsConfig, apply_to_simulation_cfg, object_loader_kwargs_from_physix
 
     # Setup sim
     phys = PhysicsConfig(device=args.device)
