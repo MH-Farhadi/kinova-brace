@@ -21,24 +21,34 @@ def main(argv: Optional[list[str]] = None) -> int:
     from data_collection.profiles.registry import get_profiles
 
     profiles = get_profiles()
+    
+    # First pass: parse only the profile argument
+    parser_pre = argparse.ArgumentParser(description="Modular data collection entrypoint", add_help=False)
+    parser_pre.add_argument("--profile", type=str, default="ticks_v0", choices=sorted(profiles.keys()))
+    pre_args, remaining_argv = parser_pre.parse_known_args(argv)
+    
+    # Get the selected profile
+    selected_profile = profiles[str(pre_args.profile)]
+    
+    # Second pass: add all args from the selected profile
     parser = argparse.ArgumentParser(description="Modular data collection entrypoint")
-    parser.add_argument("--profile", type=str, default="ticks_v0", choices=sorted(profiles.keys()))
+    parser.add_argument("--profile", type=str, default=pre_args.profile, choices=sorted(profiles.keys()))
 
     # Add common args (object spawning + controller knobs)
     from scripts.cli import add_demo_cli_args
 
     add_demo_cli_args(parser)
 
-    # Add profile args (includes --env etc)
-    profiles["ticks_v0"].add_cli_args(parser)
+    # Add args only from the selected profile
+    selected_profile.add_cli_args(parser)
 
     # Isaac AppLauncher args (device, headless, etc)
     from isaaclab.app import AppLauncher
 
     AppLauncher.add_app_launcher_args(parser)
 
-    args = parser.parse_args(argv)
-    return profiles[str(args.profile)].run(args)
+    args = parser.parse_args(remaining_argv)
+    return selected_profile.run(args)
 
 
 if __name__ == "__main__":
