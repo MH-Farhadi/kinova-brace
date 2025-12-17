@@ -9,7 +9,9 @@ RunFn = Callable[["argparse.Namespace"], int]
 
 
 @dataclass(frozen=True)
-class TaskSpec:
+class ProfileSpec:
+    """A collection profile: defines recorded structure + collection loop implementation."""
+
     name: str
     add_cli_args: AddArgsFn
     run: RunFn

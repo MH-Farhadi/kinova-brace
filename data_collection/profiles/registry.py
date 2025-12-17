@@ -1,0 +1,26 @@
+from __future__ import annotations
+
+from typing import Dict
+
+from .spec import ProfileSpec
+
+
+def get_profiles() -> Dict[str, ProfileSpec]:
+    # Keep CLI startup lightweight: do NOT import profile modules here.
+    # Import them only when their functions are actually invoked.
+
+    def _ticks_v0_add_args(parser) -> None:
+        from . import ticks_v0
+
+        ticks_v0.add_cli_args(parser)
+
+    def _ticks_v0_run(args) -> int:
+        from . import ticks_v0
+
+        return ticks_v0.run(args)
+
+    return {
+        "ticks_v0": ProfileSpec(name="ticks_v0", add_cli_args=_ticks_v0_add_args, run=_ticks_v0_run),
+    }
+
+
