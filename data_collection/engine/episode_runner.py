@@ -12,7 +12,7 @@ from controllers import CartesianVelocityJogController, CartesianVelocityJogConf
 from ..config import RunConfig
 from controllers.input.waypoint_follower import WaypointFollowerInput
 from ..engine.waypoints import generate_waypoints_base
-from ..samplers.grasp_estimation import compute_object_topdown_grasp_pose_w
+import importlib
 from assist.logger import SessionLogWriter, TickLoggingConfig
 from assist.objects import ObjectsTracker
 
@@ -53,6 +53,15 @@ class EpisodeRunner:
         step_pos = float(self.controller.config.linear_speed_mps) * dt
         self.input = WaypointFollowerInput(step_pos_m=step_pos, tol_m=self.cfg.planner.tolerance_m, device=str(self.sim.device))
         self.controller.set_input_provider(self.input)
+        # Grasp provider: OBB-based with minor-axis alignment
+        try:
+            obb_mod = importlib.import_module("motion_generation.grasp_estimation.obb")
+            ProviderCls = getattr(obb_mod, "ObbGraspPoseProvider", None) or getattr(obb_mod, "OBBGraspPoseProvider", None)
+            if ProviderCls is None:
+                raise AttributeError("ObbGraspPoseProvider/OBBGraspPoseProvider not found")
+            self._grasp_provider = ProviderCls(align_to_min_width=True)
+        except Exception as e:
+            raise ImportError(f"[MG][ERROR] Failed to import OBB grasp provider: {e}")
 
     def _read_ee_pose_b(self) -> torch.Tensor:
         body_ids, _ = self.robot.find_bodies([self.controller.config.ee_link_name])
@@ -140,7 +149,7 @@ class EpisodeRunner:
         if target is None:
             return EpisodeOutcome(False, "no_target", target_id, target_label_res)
 
-        # Build waypoints in base frame using AABB-based grasp estimation
+        # Build waypoints in base frame using OBB-based grasp estimation
         # Reconstruct full prim path from tracker by matching trailing id
         prim_path = None
         try:
@@ -151,7 +160,7 @@ class EpisodeRunner:
         except Exception:
             prim_path = None
         if prim_path is not None:
-            grasp_pos_w, _ = compute_object_topdown_grasp_pose_w(prim_path=prim_path)
+            grasp_pos_w, _ = self._grasp_provider.get_grasp_pose_w(object_prim_path=prim_path, robot_prim_path=None)
             pos_w = torch.tensor(grasp_pos_w, dtype=torch.float32, device=self.sim.device)
         else:
             pos_w = torch.tensor(target["pose"].position_m, dtype=torch.float32, device=self.sim.device)

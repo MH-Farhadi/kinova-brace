@@ -29,6 +29,11 @@ class ObjectLoaderConfig:
     
     # Optional uniform scale range applied per object (x=y=z)
     uniform_scale_range: tuple[float, float] | None = None
+    # Optional label filtering: if provided, only objects whose derived label
+    # (basename without numeric prefix or extension) is in this list are spawned.
+    include_labels: list[str] | None = None
+    # If True, print the set of available labels at construction time.
+    print_available_labels: bool = False
     
     # Physics and placement
     enable_physics: bool = True
@@ -65,8 +70,20 @@ class ObjectLoader:
         self._usd_file_paths: list[str] = self._collect_usd_files(cfg.dataset_dirs)
         if len(self._usd_file_paths) == 0:
             raise FileNotFoundError(f"No .usd files found in dataset_dirs={cfg.dataset_dirs}.")
+
+        # Pre-compute labels for all USDs using the same logic as spawn()
+        self._usd_path_to_label: dict[str, str] = {
+            path: self._derive_label_from_usd_path(path) for path in self._usd_file_paths
+        }
         # Map of spawned prim path -> human-readable label (derived from USD filename)
         self._last_spawn_label_map: dict[str, str] = {}
+
+        # Optionally print all available labels (unique, sorted)
+        if self.cfg.print_available_labels:
+            unique_labels = sorted(set(self._usd_path_to_label.values()))
+            print("[ObjectLoader] Available labels:")
+            for lbl in unique_labels:
+                print(f"  - {lbl}")
 
     def get_last_spawn_labels(self) -> dict[str, str]:
         """Return a copy of the last spawn's mapping from prim path to label.
@@ -75,6 +92,29 @@ class ObjectLoader:
         Returns an empty dict if nothing has been spawned yet.
         """
         return dict(self._last_spawn_label_map)
+
+    @staticmethod
+    def _derive_label_from_usd_path(usd_path: str) -> str:
+        """Derive a human-readable label from a USD file path.
+
+        This mirrors the logic used in spawn():
+        - Take basename
+        - Strip known extensions
+        - Strip leading numeric prefixes like "037_" or "005-"
+        """
+        try:
+            base_name = str(usd_path).rstrip("/").split("/")[-1]
+            lower_name = base_name.lower()
+            raw = base_name
+            for ext in (".usd", ".usda", ".usdc", ".usdz"):
+                if lower_name.endswith(ext):
+                    raw = base_name[: -len(ext)]
+                    break
+            # Strip leading numeric id prefixes like "037_" or "005-"
+            simplified = re.sub(r"^\d+[_-]+", "", raw)
+            return simplified
+        except Exception:
+            return str(usd_path)
 
     @staticmethod
     def _collect_usd_files(dirs: Iterable[str]) -> list[str]:
@@ -191,6 +231,24 @@ class ObjectLoader:
         dx, dy, dz = a[0] - b[0], a[1] - b[1], a[2] - b[2]
         return (dx * dx + dy * dy + dz * dz) ** 0.5
 
+    @staticmethod
+    def _quat_mul(q1: tuple[float, float, float, float], q2: tuple[float, float, float, float]) -> tuple[float, float, float, float]:
+        """Quaternion multiplication q = q1 * q2 in (w, x, y, z) format."""
+        w1, x1, y1, z1 = q1
+        w2, x2, y2, z2 = q2
+        return (
+            w1 * w2 - x1 * x2 - y1 * y2 - z1 * z2,
+            w1 * x2 + x1 * w2 + y1 * z2 - z1 * y2,
+            w1 * y2 - x1 * z2 + y1 * w2 + z1 * x2,
+            w1 * z2 + x1 * y2 - y1 * x2 + z1 * w2,
+        )
+
+    @staticmethod
+    def _yaw_quat(yaw_rad: float) -> tuple[float, float, float, float]:
+        """Quaternion for a pure Z-axis rotation by yaw_rad (radians)."""
+        half = 0.5 * yaw_rad
+        return (math.cos(half), 0.0, 0.0, math.sin(half))
+
     def _generate_positions(self, count: int) -> list[tuple[float, float, float]]:
         """Generate non-overlapping positions for objects."""
         positions: list[tuple[float, float, float]] = []
@@ -305,14 +363,27 @@ class ObjectLoader:
         # Prepare objects container
         objects_root = self._ensure_parent_prim(parent_prim_path, self.cfg.parent_objects_relpath)
 
-        # Select USDs
-        if num_objects <= len(self._usd_file_paths):
-            selection = random.sample(self._usd_file_paths, k=num_objects)
+        # Optionally filter USDs by include_labels if provided
+        candidate_paths = self._usd_file_paths
+        if self.cfg.include_labels:
+            include_set = {lbl.lower() for lbl in self.cfg.include_labels}
+            filtered = [
+                p for p in self._usd_file_paths
+                if self._usd_path_to_label.get(p, "").lower() in include_set
+            ]
+            if len(filtered) == 0:
+                print(f"[ObjectLoader][WARN] No USDs matched include_labels={self.cfg.include_labels}; using all objects.")
+            else:
+                candidate_paths = filtered
+
+        # Select USDs from candidate set
+        if num_objects <= len(candidate_paths):
+            selection = random.sample(candidate_paths, k=num_objects)
         else:
-            selection = [random.choice(self._usd_file_paths) for _ in range(num_objects)]
+            selection = [random.choice(candidate_paths) for _ in range(num_objects)]
 
         positions = self._generate_positions(len(selection))
-        orientation = self._compute_orientation()
+        base_orientation = self._compute_orientation()
         spawned_prim_paths: list[str] = []
 
         # Reset label map for this spawn call
@@ -339,26 +410,23 @@ class ObjectLoader:
 
             prim_path = f"{objects_root}/Obj_{idx:02d}"
             # Derive a readable label from the USD filename (works for local paths and Nucleus URLs)
-            try:
-                base_name = str(usd_path).rstrip("/").split("/")[-1]
-                lower_name = base_name.lower()
-                raw = base_name
-                for ext in (".usd", ".usda", ".usdc", ".usdz"):
-                    if lower_name.endswith(ext):
-                        raw = base_name[: -len(ext)]
-                        break
-                # Strip leading numeric id prefixes like "037_" or "005-"
-                simplified = re.sub(r"^\d+[_-]+", "", raw)
-                label = simplified
-            except Exception:
-                label = f"Obj_{idx:02d}"
+            label = self._usd_path_to_label.get(str(usd_path), f"Obj_{idx:02d}")
             
             try:
-                # Spawn object
-                if orientation is not None:
-                    usd_cfg.func(prim_path, usd_cfg, translation=pos, orientation=orientation)
+                # Per-object random yaw around Z to diversify object orientation
+                # This helps OBB-based grasp providers produce varied yaw even
+                # when assets share similar authored frames.
+                yaw_rad = random.uniform(-math.pi, math.pi)
+                yaw_quat = self._yaw_quat(yaw_rad)
+
+                if base_orientation is not None:
+                    # Combine configured orientation with random yaw
+                    orientation = self._quat_mul(yaw_quat, base_orientation)
                 else:
-                    usd_cfg.func(prim_path, usd_cfg, translation=pos)
+                    orientation = yaw_quat
+
+                # Spawn object
+                usd_cfg.func(prim_path, usd_cfg, translation=pos, orientation=orientation)
                 
                 # Ensure physics (silent fallback)
                 if self.cfg.enable_physics:
