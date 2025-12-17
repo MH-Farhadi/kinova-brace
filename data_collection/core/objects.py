@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from typing import Dict, List, Optional, Tuple
 import importlib
+from typing import Dict, List, Optional, Tuple
 
 from .schemas import DetectedObject, Pose
 
@@ -46,16 +46,23 @@ class ObjectsTracker:
         self._rigid_root_map[root_path] = (rigid_path, physx_view)
         return self._rigid_root_map[root_path]
 
-    def _read_prim_pose(self, prim_path: str) -> Optional[Tuple[Tuple[float, float, float], Tuple[float, float, float, float]]]:
+    def _read_prim_pose(
+        self, prim_path: str
+    ) -> Optional[Tuple[Tuple[float, float, float], Tuple[float, float, float, float]]]:
         # Prefer PhysX transforms for dynamic objects
         try:
             rv = self._ensure_rigid_view(prim_path)
             if rv is not None:
-                rigid_path, physx_view = rv
+                _, physx_view = rv
                 # get_transforms returns [x,y,z,qx,qy,qz,qw]
                 pose = getattr(physx_view, "get_transforms")().clone()[0]
                 px, py, pz = float(pose[0].item()), float(pose[1].item()), float(pose[2].item())
-                qx, qy, qz, qw = float(pose[3].item()), float(pose[4].item()), float(pose[5].item()), float(pose[6].item())
+                qx, qy, qz, qw = (
+                    float(pose[3].item()),
+                    float(pose[4].item()),
+                    float(pose[5].item()),
+                    float(pose[6].item()),
+                )
                 return (px, py, pz), (qw, qx, qy, qz)
         except Exception:
             pass

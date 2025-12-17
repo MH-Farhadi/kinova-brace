@@ -8,12 +8,18 @@ from isaaclab.app import AppLauncher
 from controllers import ModeManager
 
 # Ensure project root (kinova-isaac/) on sys.path for modular imports
-# This file lives at kinova-isaac/environments/reach_to_grasp/demo.py, so repo root is parents[2].
+# This file lives at kinova-isaac/environments/reach_to_grasp_VLA/demo_VLA.py, so repo root is parents[2].
 ROOT = Path(__file__).resolve().parents[2]
 root_str = str(ROOT)
 if root_str in sys.path:
     sys.path.remove(root_str)
 sys.path.insert(0, root_str)
+
+# Isaac/Omni may preload a non-package module named `environments`, which breaks
+# `import environments.<...>` later. If that happens, evict it so our local package wins.
+_env_mod = sys.modules.get("environments")
+if _env_mod is not None and not hasattr(_env_mod, "__path__"):
+    del sys.modules["environments"]
 
 from controllers import (
     CartesianVelocityJogConfig,
