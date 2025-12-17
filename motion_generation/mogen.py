@@ -20,7 +20,7 @@ from .grasp_estimation.base import GraspPoseProvider
 
 if TYPE_CHECKING:
     # Imported only for type checking; avoids importing heavy sim/omni deps at module import time.
-    from environments.object_loader import ObjectLoader
+    from environments.utils.object_loader import ObjectLoader
 
 
 @dataclass

@@ -1,42 +1,50 @@
 from __future__ import annotations
 
 import argparse
+import sys
+from pathlib import Path
 from typing import Optional
 
-from isaaclab.app import AppLauncher
+# Ensure kinova-isaac root is first on sys.path so our top-level packages (e.g. `environments/`)
+# win over any Isaac/Omni modules with the same name.
+ROOT = Path(__file__).resolve().parents[1]
+root_str = str(ROOT)
+if root_str in sys.path:
+    sys.path.remove(root_str)
+sys.path.insert(0, root_str)
 
+# If a non-package `environments` module gets preloaded, it will break `environments.*` imports.
+_env_mod = sys.modules.get("environments")
+if _env_mod is not None and not hasattr(_env_mod, "__path__"):
+    del sys.modules["environments"]
 
-def add_cli_args(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("--num-episodes", type=int, default=10)
-    parser.add_argument("--target-label", type=str, default=None)
-    parser.add_argument("--objects-dataset", type=str, nargs="*", default=[])
-    parser.add_argument("--num-objects", type=int, default=1)
-    parser.add_argument("--spawn-min", type=float, nargs=3, default=[0.30, -0.20, 0.02])
-    parser.add_argument("--spawn-max", type=float, nargs=3, default=[0.55, 0.20, 0.05])
-    parser.add_argument("--pregrasp", type=float, default=0.10)
-    parser.add_argument("--lift", type=float, default=0.15)
-    parser.add_argument("--speed", type=float, default=0.20)
-    parser.add_argument("--tolerance", type=float, default=0.005)
-    parser.add_argument("--logs-root", type=str, default="logs/data_collection")
-    parser.add_argument(
-        "--planner",
-        type=str,
-        default="scripted",
-        choices=["scripted", "rmpflow", "curobo"],
-        help="Planner backend to use during data collection.",
-    )
-    AppLauncher.add_app_launcher_args(parser)
+from data_collection.tasks.registry import get_tasks
 
 
 def main(argv: Optional[list[str]] = None) -> int:
-    parser = argparse.ArgumentParser(description="Data collection using motion_generation planners")
-    add_cli_args(parser)
+    tasks = get_tasks()
+    parser = argparse.ArgumentParser(description="Data collection task runner")
+    subparsers = parser.add_subparsers(dest="task", required=False)
+
+    # Default task if user doesn't provide a subcommand
+    default_task = "reach_to_grasp"
+
+    for name, spec in tasks.items():
+        sp = subparsers.add_parser(name, help=f"Run task: {name}")
+        spec.add_cli_args(sp)
+        sp.set_defaults(_run_fn=spec.run)
+
+    # Parse
     args = parser.parse_args(argv)
+    if getattr(args, "_run_fn", None) is None:
+        # No subcommand provided → run default task
+        spec = tasks[default_task]
+        sp = argparse.ArgumentParser(description=f"Data collection task runner ({default_task})")
+        spec.add_cli_args(sp)
+        args2 = sp.parse_args(argv)
+        return spec.run(args2)
 
-    # Delegate to data collection demo
-    from .demo import run_data_collection
-
-    return run_data_collection(args)
+    return args._run_fn(args)  # type: ignore[attr-defined]
 
 
 if __name__ == "__main__":

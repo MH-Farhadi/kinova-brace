@@ -5,13 +5,21 @@ import sys
 from pathlib import Path
 from typing import Dict
 
+# Ensure project root on sys.path for modular imports (do this BEFORE any Isaac/Omni imports).
+ROOT = Path(__file__).resolve().parents[1]
+root_str = str(ROOT)
+if root_str in sys.path:
+    sys.path.remove(root_str)
+sys.path.insert(0, root_str)
+
+# Isaac Sim sometimes preloads a non-package module named `environments`, which breaks
+# `import environments.<...>` later. If that happens, evict it so our local package wins.
+_env_mod = sys.modules.get("environments")
+if _env_mod is not None and not hasattr(_env_mod, "__path__"):
+    del sys.modules["environments"]
+
 import torch
 from isaaclab.app import AppLauncher
-
-# Ensure project root on sys.path for modular imports
-ROOT = Path(__file__).resolve().parents[1]
-if str(ROOT) not in sys.path:
-    sys.path.append(str(ROOT))
 
 from controllers import (  # noqa: E402
     CartesianVelocityJogConfig,
@@ -20,7 +28,7 @@ from controllers import (  # noqa: E402
 from data_collection.core.logger import SessionLogWriter, TickLoggingConfig  # noqa: E402
 from data_collection.core.objects import ObjectsTracker  # noqa: E402
 
-from motion_generation.config import (  # noqa: E402
+from data_collection.config import (  # noqa: E402
     RunConfig,
     EpisodeConfig,
     TaskConfig,
@@ -35,25 +43,32 @@ def run_data_collection(args: argparse.Namespace) -> int:
     simulation_app = app_launcher.app
 
     # Import Isaac/scene modules that require an active Omniverse app
+    # Re-pin our repo root on sys.path because Kit/Isaac can mutate sys.path during startup.
+    root_str = str(ROOT)
+    if root_str in sys.path:
+        sys.path.remove(root_str)
+    sys.path.insert(0, root_str)
+    _env_mod = sys.modules.get("environments")
+    if _env_mod is not None and not hasattr(_env_mod, "__path__"):
+        del sys.modules["environments"]
+
     import isaaclab.sim as sim_utils  # noqa: E402
     from environments.reach_to_grasp.utils import design_scene  # noqa: E402
     from environments.reach_to_grasp.config import (  # noqa: E402
         DEFAULT_SCENE,
         DEFAULT_CAMERA,
     )
-    from environments.object_loader import (  # noqa: E402
+    from environments.utils.object_loader import (  # noqa: E402
         ObjectLoader,
         ObjectLoaderConfig,
         SpawnBounds,
     )
-    from environments.physix import (  # noqa: E402
+    from environments.utils.physix import (  # noqa: E402
         PhysicsConfig,
         apply_to_simulation_cfg,
         object_loader_kwargs_from_physix,
     )
-    from motion_generation.engine.episode_runner import (  # noqa: E402
-        EpisodeRunner,
-    )
+    from data_collection.engine.episode_runner import EpisodeRunner  # noqa: E402
 
     # Setup simulation
     phys = PhysicsConfig(device=args.device)
