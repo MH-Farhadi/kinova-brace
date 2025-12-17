@@ -1,4 +1,4 @@
-"""Assistive control pipeline (v0) for Kinova Isaac simulation.
+"""Assistive control pipeline (v0) for Kinova Isaac simulation
 
 This package exposes:
 - config: hyperparameters and tunable thresholds
