@@ -76,12 +76,16 @@ def main():
     import isaaclab.sim as sim_utils
     try:
         from environments.reach_to_grasp.config import DEFAULT_SCENE, DEFAULT_CAMERA
-        from environments.reach_to_grasp.utils import design_scene
+        from environments.reach_to_grasp_VLA.config import DEFAULT_TOP_DOWN_CAMERA
+        from environments.reach_to_grasp_VLA.utils import design_scene
+        from environments.utils.camera import create_topdown_camera
         from environments.utils.object_loader import ObjectLoader, ObjectLoaderConfig, SpawnBounds
         from environments.utils.physix import PhysicsConfig, apply_to_simulation_cfg, object_loader_kwargs_from_physix
     except Exception:
         from ..environments.reach_to_grasp.config import DEFAULT_SCENE, DEFAULT_CAMERA  # type: ignore
-        from ..environments.reach_to_grasp.utils import design_scene  # type: ignore
+        from ..environments.reach_to_grasp_VLA.config import DEFAULT_TOP_DOWN_CAMERA  # type: ignore
+        from ..environments.reach_to_grasp_VLA.utils import design_scene  # type: ignore
+        from ..environments.utils.camera import create_topdown_camera  # type: ignore
         from ..environments.utils.object_loader import ObjectLoader, ObjectLoaderConfig, SpawnBounds  # type: ignore
         from ..environments.utils.physix import PhysicsConfig, apply_to_simulation_cfg, object_loader_kwargs_from_physix  # type: ignore
 
@@ -97,6 +101,11 @@ def main():
     # Build scene and fetch robot
     scene_entities, scene_origins = design_scene(DEFAULT_SCENE)
     robot = scene_entities["kinova_j2n6s300"]
+    
+    # Create top-down camera
+    create_topdown_camera(DEFAULT_TOP_DOWN_CAMERA)
+    print(f"[INFO] Top-down camera created at: {DEFAULT_TOP_DOWN_CAMERA.prim_path}")
+    print(f"[INFO] To view camera in Isaac Sim: Window > Views > Camera, then select '{DEFAULT_TOP_DOWN_CAMERA.prim_path}'")
 
     # Spawn objects from Nucleus YCB
     spawned_paths = []

@@ -38,6 +38,26 @@ class CameraConfig:
     target: Tuple[float, float, float] = (0.0, 0.0, 0.5)
 
 
+@dataclass
+class TopDownCameraConfig:
+    """Top-down camera configuration for VLA environment.
+    
+    To adjust the camera view:
+    - position: (x, y, z) - Camera location. Higher z = more overhead view.
+      Default: (0.0, 0.0, 2.0) = directly above robot base at 2.0m height
+    - target: (x, y, z) - Point the camera looks at. 
+      Default: (0.4, 0.0, 0.8) = workspace center at table surface height
+    - fov: Field of view in degrees. Higher = wider view, lower = zoomed in.
+      Default: 70.0 degrees for good workspace coverage
+    """
+
+    prim_path: str = "/World/Origin1/TopDownCamera"
+    position: Tuple[float, float, float] = (0.4, 0.0, 4.0)  # Directly above table center, ~1.7m above table surface for wider overview
+    target: Tuple[float, float, float] = (0.4, 0.0, 0.8)  # Looking at workspace center at table surface (table top at z=0.8)
+    resolution: Tuple[int, int] = (640, 640)
+    fov: float = 65.0  # degrees - wider FOV to see more of the workspace and robot
+
+
 DEFAULT_SCENE = SceneConfig(
     robot_default_joint_pos={
         "j2n6s300_joint_1": 0*np.pi, # j2n6s300_joint_1: [-inf, inf]
@@ -57,5 +77,6 @@ DEFAULT_SCENE = SceneConfig(
 )
 
 DEFAULT_CAMERA = CameraConfig()
+DEFAULT_TOP_DOWN_CAMERA = TopDownCameraConfig()
 
 
