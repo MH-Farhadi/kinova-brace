@@ -13,8 +13,8 @@ from ..config import RunConfig
 from controllers.input.waypoint_follower import WaypointFollowerInput
 from ..engine.waypoints import generate_waypoints_base
 import importlib
-from assist.logger import SessionLogWriter, TickLoggingConfig
-from assist.objects import ObjectsTracker
+from data_collection.core.logger import SessionLogWriter, TickLoggingConfig
+from data_collection.core.objects import ObjectsTracker
 
 
 @dataclass

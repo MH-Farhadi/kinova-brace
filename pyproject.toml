@@ -12,6 +12,18 @@ requires-python = ">=3.11"
 [tool.setuptools]
 packages = [
   "controllers",
+  "controllers.cartesian_velocity",
+  "controllers.input",
+  "controllers.modes",
+  "data_collection",
+  "data_collection.core",
   "environments",
+  "environments.reach_to_grasp",
+  "environments.reach_to_grasp_VLA",
+  "kinova",
+  "motion_generation",
+  "motion_generation.grasp_estimation",
+  "motion_generation.planners",
+  "utils",
 ]
 include-package-data = true 

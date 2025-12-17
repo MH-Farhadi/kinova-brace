@@ -17,7 +17,7 @@ def add_cli_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--lift", type=float, default=0.15)
     parser.add_argument("--speed", type=float, default=0.20)
     parser.add_argument("--tolerance", type=float, default=0.005)
-    parser.add_argument("--logs-root", type=str, default="logs/assist")
+    parser.add_argument("--logs-root", type=str, default="logs/data_collection")
     parser.add_argument(
         "--planner",
         type=str,

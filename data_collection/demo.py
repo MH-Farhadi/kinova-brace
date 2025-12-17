@@ -17,8 +17,8 @@ from controllers import (  # noqa: E402
     CartesianVelocityJogConfig,
     CartesianVelocityJogController,
 )
-from assist.logger import SessionLogWriter, TickLoggingConfig  # noqa: E402
-from assist.objects import ObjectsTracker  # noqa: E402
+from data_collection.core.logger import SessionLogWriter, TickLoggingConfig  # noqa: E402
+from data_collection.core.objects import ObjectsTracker  # noqa: E402
 
 from motion_generation.config import (  # noqa: E402
     RunConfig,
@@ -230,7 +230,7 @@ if __name__ == "__main__":
     ap.add_argument("--pregrasp", type=float, default=0.10)
     ap.add_argument("--lift", type=float, default=0.15)
     ap.add_argument("--tolerance", type=float, default=0.005)
-    ap.add_argument("--logs-root", type=str, default="logs/assist")
+    ap.add_argument("--logs-root", type=str, default="logs/data_collection")
     ap.add_argument("--planner", type=str, default="scripted", choices=["scripted", "rmpflow", "curobo"])
     AppLauncher.add_app_launcher_args(ap)
     args_cli = ap.parse_args()

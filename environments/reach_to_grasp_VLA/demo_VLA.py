@@ -18,13 +18,9 @@ from controllers import (
     Se3KeyboardInput,
     ModeManager,
 )
-from assist.input_mux import CommandMuxInputProvider
-from assist.objects import ObjectsTracker
-from assist.logger import SessionLogWriter, TickLoggingConfig
-from assist.config import AssistConfig, from_cli_args
-from assist.input_mux import CommandMuxInputProvider
-from assist.objects import ObjectsTracker
-from assist.orchestrator import AssistOrchestrator
+from data_collection.core.input_mux import CommandMuxInputProvider
+from data_collection.core.objects import ObjectsTracker
+from data_collection.core.logger import SessionLogWriter, TickLoggingConfig
 
 
 def run(sim, robot, controller: CartesianVelocityJogController, simulation_app, *, mux_input: CommandMuxInputProvider | None, obj_tracker: ObjectsTracker | None, session_logger: SessionLogWriter | None, tick_cfg: TickLoggingConfig | None, id_to_label: dict[str, str] | None = None):
