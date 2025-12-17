@@ -123,6 +123,8 @@ def run(args: argparse.Namespace) -> int:
     )
     controller = CartesianVelocityJogController(ctrl_cfg, num_envs=1, device=str(sim.device))
     controller.set_mode("translate")
+    # Important: controller must be reset before stepping (initializes internal IK, buffers, etc.)
+    controller.reset(robot)
 
     # Input/control
     mux_input = CommandMuxInputProvider()
