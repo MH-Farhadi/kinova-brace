@@ -7,10 +7,13 @@ import torch
 from isaaclab.app import AppLauncher
 from controllers import ModeManager
 
-# Ensure project root on sys.path for modular imports
-ROOT = Path(__file__).resolve().parents[1]
-if str(ROOT) not in sys.path:
-    sys.path.append(str(ROOT))
+# Ensure project root (kinova-isaac/) on sys.path for modular imports
+# This file lives at kinova-isaac/environments/reach_to_grasp/demo.py, so repo root is parents[2].
+ROOT = Path(__file__).resolve().parents[2]
+root_str = str(ROOT)
+if root_str in sys.path:
+    sys.path.remove(root_str)
+sys.path.insert(0, root_str)
 
 from controllers import (
     CartesianVelocityJogConfig,
