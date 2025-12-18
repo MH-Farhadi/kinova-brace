@@ -5,10 +5,13 @@ from .scripted import ScriptedPlanner
 from .rmpflow import RmpFlowPlanner
 from .curobo import CuroboPlanner
 from .lula import LulaPlanner
+from .curobo_vla import CuroboVLAPlanner
 
 
 def create_planner(kind: str, *, ctx: PlannerContext) -> BasePlanner:
     kind_l = (kind or "").lower()
+    if kind_l in ("curobo_vla", "curobo-vla", "curobo_vla_vla", "curobo-vla-vla"):
+        return CuroboVLAPlanner(ctx)
     if kind_l == "rmpflow":
         return RmpFlowPlanner(ctx)
     if kind_l == "curobo":

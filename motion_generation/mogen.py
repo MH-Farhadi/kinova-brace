@@ -15,7 +15,7 @@ fetch the latest grasp pose for a given object label.
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple, TYPE_CHECKING
 
-from utils import world_to_base_pos, world_to_base_quat
+from utilities import world_to_base_pos, world_to_base_quat
 from .grasp_estimation.base import GraspPoseProvider
 
 if TYPE_CHECKING:

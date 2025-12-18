@@ -15,8 +15,23 @@ def add_cli_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--logs-root", type=str, default="logs/data_collection")
     parser.add_argument("--log-rate-hz", type=int, default=10)
     parser.add_argument("--duration-s", type=float, default=30.0)
-    parser.add_argument("--control", type=str, default="keyboard", choices=["keyboard", "idle"])
+    parser.add_argument("--control", type=str, default="keyboard", choices=["keyboard", "idle", "planner"])
     parser.add_argument("--image-format", type=str, default="png", choices=["png", "jpg"], help="Image format for saving")
+    # Planner-driven reach-to-grasp (VLA)
+    parser.add_argument(
+        "--planner",
+        type=str,
+        default="curobo_vla",
+        choices=["curobo_vla", "curobo", "lula", "rmpflow", "scripted"],
+        help="Planner backend for --control planner (default: curobo_vla)",
+    )
+    parser.add_argument("--target-label", type=str, default=None, help="Optional target object label filter")
+    parser.add_argument("--pregrasp", type=float, default=0.10, help="Pre-grasp offset above object top (m)")
+    parser.add_argument("--lift", type=float, default=0.15, help="Lift height after grasp (m)")
+    parser.add_argument("--tolerance", type=float, default=0.005, help="Waypoint tolerance for planner control (m)")
+    parser.add_argument("--stabilize-steps", type=int, default=300, help="Hold steps before first plan (physics settle)")
+    parser.add_argument("--gripper-open-steps", type=int, default=10, help="Steps to open gripper before approach")
+    parser.add_argument("--gripper-close-steps", type=int, default=60, help="Steps to close gripper at grasp")
     # Note: --enable_cameras flag should be passed to AppLauncher for camera rendering
     # This is handled automatically by AppLauncher.add_app_launcher_args()
 
@@ -33,6 +48,14 @@ def run(args: argparse.Namespace) -> int:
     _env_mod = sys.modules.get("environments")
     if _env_mod is not None and not hasattr(_env_mod, "__path__"):
         del sys.modules["environments"]
+    # Same collision as in collect_data.py: Isaac may preload `cv2.utils` which shadows our `utils/`.
+    _utils_mod = sys.modules.get("utils")
+    if _utils_mod is not None:
+        _utils_file = str(getattr(_utils_mod, "__file__", "") or "")
+        if _utils_file and root_str not in _utils_file:
+            for _k in list(sys.modules.keys()):
+                if _k == "utils" or _k.startswith("utils."):
+                    del sys.modules[_k]
 
     # Heavy imports (torch / isaaclab / omni) must happen only after Kit is started.
     from isaaclab.app import AppLauncher
@@ -68,6 +91,7 @@ def run(args: argparse.Namespace) -> int:
 
     # Imports requiring active app
     import importlib
+    import random
     import isaaclab.sim as sim_utils
     from isaaclab.sensors import Camera, CameraCfg
     from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR
@@ -210,7 +234,8 @@ def run(args: argparse.Namespace) -> int:
 
     # Input/control
     mux_input = CommandMuxInputProvider()
-    if (not getattr(args, "headless", False)) and str(getattr(args, "control", "keyboard")) == "keyboard":
+    control_mode = str(getattr(args, "control", "keyboard"))
+    if (not getattr(args, "headless", False)) and control_mode == "keyboard":
         from controllers.input.keyboard import Se3KeyboardInput
 
         keyboard = Se3KeyboardInput(
@@ -218,6 +243,72 @@ def run(args: argparse.Namespace) -> int:
             rot_sensitivity_rad_per_step=float(getattr(args, "rot_speed", 2.0)) * sim.get_physics_dt(),
         )
         mux_input.set_base(keyboard)
+    elif control_mode == "planner":
+        # Planner-driven reach-to-grasp control.
+        # Uses MotionGen-style planners (prefer cuRobo) and executes via WaypointFollowerInput.
+        from pathlib import Path as _Path
+
+        from controllers.input.waypoint_follower import WaypointFollowerInput
+        from motion_generation.grasp_estimation.obb import ObbGraspPoseProvider
+        from motion_generation.mogen import MotionGenerationAgent
+        from motion_generation.planners import PlannerContext, create_planner
+        from utilities import get_ee_pos_base_frame
+
+        if "loader" not in locals() or loader is None:  # type: ignore[name-defined]
+            print("[VLA][PLANNER] ERROR: planner control requires object spawning (loader unavailable).")
+            print("[VLA][PLANNER] Run without --no-objects and with --num-objects >= 1.")
+            simulation_app.close()
+            return 2
+
+        # Planner context config dir: use the repo's bundled planner configs
+        cfg_dir = str(
+            (_Path(__file__).resolve().parents[2] / "motion_generation" / "planners" / "planners_config").resolve()
+        )
+        planner = create_planner(
+            str(getattr(args, "planner", "curobo_vla")),
+            ctx=PlannerContext(
+                base_frame="base_link",
+                ee_link_name=str(getattr(args, "ee_link", "j2n6s300_end_effector")),
+                urdf_path=str((_Path(cfg_dir) / "cuRobo" / "kinovaJacoJ2N6S300.urdf").resolve()),
+                config_dir=cfg_dir,
+            ),
+        )
+        print(f"[VLA][PLANNER] Control enabled. planner={getattr(args, 'planner', 'curobo_vla')} cfg_dir={cfg_dir}")
+        grasp_provider = ObbGraspPoseProvider(align_to_min_width=True)
+
+        robot_prim_path: Optional[str] = None
+        try:
+            robot_prim_path = str(getattr(getattr(robot, "cfg", None), "prim_path", None))
+        except Exception:
+            robot_prim_path = None
+
+        agent = MotionGenerationAgent(
+            sim=sim,
+            robot=robot,
+            controller=controller,
+            planner=planner,
+            grasp_provider=grasp_provider,
+            loader=loader,  # type: ignore[name-defined]
+            robot_prim_path=robot_prim_path,
+        )
+
+        dt_local = float(sim.get_physics_dt())
+        wp = WaypointFollowerInput(
+            step_pos_m=float(ctrl_cfg.linear_speed_mps) * dt_local,
+            tol_m=float(getattr(args, "tolerance", 0.005)),
+            device=str(sim.device),
+        )
+        mux_input.set_base(wp)
+
+        # Minimal internal state machine for reach->grasp->lift
+        vla_planner_state = {
+            "stage": "init_open",  # init_open -> approach -> close -> lift -> idle
+            "target_prim": None,
+            "lift_pt": None,
+            "open_left": int(getattr(args, "gripper_open_steps", 10)),
+            "close_left": int(getattr(args, "gripper_close_steps", 60)),
+            "stabilize_left": int(getattr(args, "stabilize_steps", 300)),
+        }
     controller.set_input_provider(mux_input)
 
     # Tracker + logger
@@ -266,6 +357,119 @@ def run(args: argparse.Namespace) -> int:
     last_progress_print = t0
     images_captured = 0
     while simulation_app.is_running() and (time.time() - t0) < float(getattr(args, "duration_s", 30.0)):
+        # Planner-driven reach-to-grasp state machine (optional)
+        if control_mode == "planner":
+            try:
+                # Update EE pose for waypoint tracking
+                wp.set_current_pose_b(get_ee_pos_base_frame(robot, str(getattr(args, "ee_link", "j2n6s300_end_effector"))))
+            except Exception:
+                pass
+
+            try:
+                # Optional stabilization window before first plan (lets physics settle)
+                stab_left = int(vla_planner_state.get("stabilize_left", 0))
+                if stab_left > 0:
+                    vla_planner_state["stabilize_left"] = stab_left - 1
+                else:
+                    stage = str(vla_planner_state.get("stage", "idle"))
+
+                    # Open gripper once at the beginning
+                    if stage == "init_open":
+                        open_left = int(vla_planner_state.get("open_left", 0))
+                        if not vla_planner_state.get("open_queued", False):
+                            try:
+                                controller.set_mode("gripper")
+                                wp.queue_gripper(+1.0, steps=open_left)
+                            except Exception:
+                                pass
+                            vla_planner_state["open_queued"] = True
+                        controller.set_mode("gripper")
+                        if open_left > 0:
+                            vla_planner_state["open_left"] = open_left - 1
+                        else:
+                            vla_planner_state["stage"] = "idle"
+
+                    # Plan + execute approach/grasp
+                    if str(vla_planner_state.get("stage", "idle")) == "idle":
+                        if len(spawned_paths) == 0:
+                            # No targets; do nothing.
+                            pass
+                        else:
+                            target_label = getattr(args, "target_label", None)
+                            target_prim, _pos_w, _quat_wxyz_w, pos_b, quat_b = agent.compute_current_grasp_for_label(
+                                label=target_label,
+                                prim_paths=spawned_paths,
+                            )
+                            waypoints = planner.plan_to_pose_b(
+                                target_pos_b=pos_b,
+                                target_quat_b_wxyz=quat_b,
+                                pregrasp_offset_m=float(getattr(args, "pregrasp", 0.10)),
+                                grasp_depth_m=0.00,
+                                lift_height_m=float(getattr(args, "lift", 0.15)),
+                            )
+                            if len(waypoints) >= 2:
+                                lift_pt = waypoints[-1]
+                                approach_pts = waypoints[:-1]
+                            else:
+                                lift_pt = (
+                                    float(pos_b[0]),
+                                    float(pos_b[1]),
+                                    float(pos_b[2] + float(getattr(args, "lift", 0.15))),
+                                )
+                                approach_pts = waypoints
+
+                            vla_planner_state["target_prim"] = target_prim
+                            vla_planner_state["lift_pt"] = lift_pt
+                            vla_planner_state["stage"] = "approach"
+                            vla_planner_state["lift_queued"] = False
+
+                            controller.set_mode("translate")
+                            wp.set_waypoints_b([(float(x), float(y), float(z)) for (x, y, z) in approach_pts])
+
+                    # When approach completes, close gripper
+                    if str(vla_planner_state.get("stage", "")) == "approach":
+                        if len(getattr(wp, "_waypoints_b", [])) == 0:
+                            vla_planner_state["stage"] = "close"
+                            vla_planner_state["close_queued"] = False
+                            vla_planner_state["close_left"] = int(getattr(args, "gripper_close_steps", 60))
+
+                    if str(vla_planner_state.get("stage", "")) == "close":
+                        close_left = int(vla_planner_state.get("close_left", 0))
+                        if not vla_planner_state.get("close_queued", False):
+                            try:
+                                controller.set_mode("gripper")
+                                wp.queue_gripper(-1.0, steps=close_left)
+                            except Exception:
+                                pass
+                            vla_planner_state["close_queued"] = True
+                        controller.set_mode("gripper")
+                        if close_left > 0:
+                            vla_planner_state["close_left"] = close_left - 1
+                        else:
+                            vla_planner_state["stage"] = "lift"
+                            vla_planner_state["lift_queued"] = False
+
+                    # Lift after grasp
+                    if str(vla_planner_state.get("stage", "")) == "lift":
+                        lift_pt = vla_planner_state.get("lift_pt", None)
+                        if lift_pt is not None and not vla_planner_state.get("lift_queued", False):
+                            controller.set_mode("translate")
+                            wp.set_waypoints_b([(float(lift_pt[0]), float(lift_pt[1]), float(lift_pt[2]))])
+                            vla_planner_state["lift_queued"] = True
+                        # When lift completes, go idle (ready to plan next)
+                        if (
+                            lift_pt is not None
+                            and vla_planner_state.get("lift_queued", False)
+                            and len(getattr(wp, "_waypoints_b", [])) == 0
+                        ):
+                            vla_planner_state["stage"] = "idle"
+                            vla_planner_state["target_prim"] = None
+                            vla_planner_state["lift_pt"] = None
+            except Exception as e:
+                # Planner errors should not crash data collection.
+                if session_logger.tick_idx < 3:
+                    print(f"[VLA][PLANNER][WARN] Planner control error: {e}")
+
         controller.step(robot, dt)
         sim.step(render=True)
         robot.update(dt)

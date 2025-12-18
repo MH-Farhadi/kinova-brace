@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import List, Tuple, Optional
 
 from .base import BasePlanner
-from utils import get_ee_pos_base_frame, yaw_from_quat_wxyz
+from utilities import get_ee_pos_base_frame, yaw_from_quat_wxyz
 
 
 class ScriptedPlanner(BasePlanner):

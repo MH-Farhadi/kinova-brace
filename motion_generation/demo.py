@@ -20,7 +20,7 @@ from motion_generation.planners import PlannerContext, create_planner
 from controllers.input.waypoint_follower import WaypointFollowerInput  
 from motion_generation.grasp_estimation.replicator import ReplicatorGraspProvider  
 from motion_generation.mogen import MotionGenerationAgent
-from utils import (  
+from utilities import (  
     enable_optional_planner_extensions,
     reset_robot_to_origin,
     get_ee_pos_base_frame,

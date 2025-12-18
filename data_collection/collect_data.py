@@ -16,6 +16,16 @@ _env_mod = sys.modules.get("environments")
 if _env_mod is not None and not hasattr(_env_mod, "__path__"):
     del sys.modules["environments"]
 
+# Isaac's bundled packages may import `cv2.utils` early, which collides with this repo's `utils/` package.
+# If `utils` is already loaded from a non-repo location, purge it so imports resolve to our package.
+_utils_mod = sys.modules.get("utils")
+if _utils_mod is not None:
+    _utils_file = str(getattr(_utils_mod, "__file__", "") or "")
+    if _utils_file and root_str not in _utils_file:
+        for _k in list(sys.modules.keys()):
+            if _k == "utils" or _k.startswith("utils."):
+                del sys.modules[_k]
+
 
 def main(argv: Optional[list[str]] = None) -> int:
     from data_collection.profiles.registry import get_profiles

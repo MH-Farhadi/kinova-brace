@@ -5,6 +5,7 @@ from .scripted import ScriptedPlanner
 from .rmpflow import RmpFlowPlanner
 from .curobo import CuroboPlanner
 from .lula import LulaPlanner
+from .curobo_vla import CuroboVLAPlanner
 from .factory import create_planner
 
 __all__ = [
@@ -13,6 +14,7 @@ __all__ = [
     "ScriptedPlanner",
     "RmpFlowPlanner",
     "CuroboPlanner",
+    "CuroboVLAPlanner",
     "LulaPlanner",
     "create_planner",
 ]
