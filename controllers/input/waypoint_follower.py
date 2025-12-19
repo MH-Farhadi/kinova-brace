@@ -21,10 +21,16 @@ class WaypointFollowerInput(InputProvider):
 		*,
 		step_pos_m: float,
 		tol_m: float = 0.005,
+		max_steps_per_waypoint: int = 600,
+		stagnation_steps: int = 60,
+		stagnation_eps_m: float = 5e-4,
 		device: str = "cpu",
 	) -> None:
 		self.step_pos_m = float(step_pos_m)
 		self.tol_m = float(tol_m)
+		self.max_steps_per_waypoint = max(1, int(max_steps_per_waypoint))
+		self.stagnation_steps = max(1, int(stagnation_steps))
+		self.stagnation_eps_m = float(stagnation_eps_m)
 		self.device = torch.device(device)
 		self._waypoints_b: List[torch.Tensor] = []
 		self._current_ee_pos_b: Optional[torch.Tensor] = None
@@ -33,6 +39,10 @@ class WaypointFollowerInput(InputProvider):
 		self._last_cmd: Optional[torch.Tensor] = None
 		self._rot_steps_left: int = 0
 		self._rot_vec_b: torch.Tensor = torch.zeros(3, dtype=torch.float32, device=self.device)
+		# Waypoint progress watchdog (prevents "hover forever" if controller can't converge exactly)
+		self._wp_steps_on_current: int = 0
+		self._wp_last_dist_m: Optional[float] = None
+		self._wp_stagnant_steps: int = 0
 
 	def reset(self) -> None:
 		self._waypoints_b = []
@@ -40,6 +50,9 @@ class WaypointFollowerInput(InputProvider):
 		self._gripper_steps_left = 0
 		self._gripper_value = 0.0
 		self._last_cmd = None
+		self._wp_steps_on_current = 0
+		self._wp_last_dist_m = None
+		self._wp_stagnant_steps = 0
 
 	def set_current_pose_b(self, ee_pos_b: torch.Tensor) -> None:
 		"""Update the current EE position in base frame: shape (3,) or (1,3)."""
@@ -49,6 +62,9 @@ class WaypointFollowerInput(InputProvider):
 
 	def set_waypoints_b(self, points_b: List[Tuple[float, float, float]]) -> None:
 		self._waypoints_b = [torch.tensor(p, dtype=torch.float32, device=self.device) for p in points_b]
+		self._wp_steps_on_current = 0
+		self._wp_last_dist_m = None
+		self._wp_stagnant_steps = 0
 
 	def queue_gripper(self, g_value: float, steps: int) -> None:
 		self._gripper_value = float(g_value)
@@ -96,9 +112,32 @@ class WaypointFollowerInput(InputProvider):
 		goal = self._waypoints_b[0]
 		diff = goal - self._current_ee_pos_b
 		dist = torch.linalg.norm(diff).item()
+		self._wp_steps_on_current += 1
+
+		# Watchdog: detect stagnation (distance not improving) to avoid being stuck forever.
+		if self._wp_last_dist_m is not None:
+			if dist > (self._wp_last_dist_m - float(self.stagnation_eps_m)):
+				self._wp_stagnant_steps += 1
+			else:
+				self._wp_stagnant_steps = 0
+		self._wp_last_dist_m = float(dist)
+
 		if dist <= self.tol_m:
 			# Reached; pop and output zero
 			self._waypoints_b.pop(0)
+			self._wp_steps_on_current = 0
+			self._wp_last_dist_m = None
+			self._wp_stagnant_steps = 0
+			cmd = torch.zeros(1, 6, dtype=torch.float32, device=self.device)
+			self._last_cmd = cmd
+			return cmd
+
+		# If we spend too long on a waypoint or stagnate, give up and pop it.
+		if self._wp_steps_on_current >= self.max_steps_per_waypoint or self._wp_stagnant_steps >= self.stagnation_steps:
+			self._waypoints_b.pop(0)
+			self._wp_steps_on_current = 0
+			self._wp_last_dist_m = None
+			self._wp_stagnant_steps = 0
 			cmd = torch.zeros(1, 6, dtype=torch.float32, device=self.device)
 			self._last_cmd = cmd
 			return cmd

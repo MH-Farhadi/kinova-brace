@@ -35,12 +35,21 @@ class CuroboVLAPlanner(BasePlanner):
         self._rt = _CuroboVLARuntime()
         self._mg: Any | None = None
         self._last_cfg_path: str | None = None
+        self._unavailable_reason: str | None = None
+        # Runtime-cached state (set by the caller, e.g. vla_v1) so we can satisfy
+        # cuRobo APIs that require a start_state for planning.
+        self._last_start_joint_pos: List[float] | None = None
+        self._last_joint_names: List[str] | None = None
+        # Dynamic world model (optional). Some cuRobo builds accept this at plan time.
+        self._world_model: Any | None = None
 
         # Best-effort availability check. We don't hard-require cuRobo at import time.
         try:
             self._import_motion_gen_symbols()
-        except Exception:
+        except Exception as e:
             self._available = False
+            self._unavailable_reason = str(e)
+            print(f"[MG][CUROBO_VLA][WARN] cuRobo MotionGen is not importable; will fall back to scripted. ({e})")
 
     def _import_motion_gen_symbols(self) -> None:
         if self._rt.MotionGen is not None and self._rt.MotionGenConfig is not None:
@@ -96,8 +105,61 @@ class CuroboVLAPlanner(BasePlanner):
             pass
         return cfg
 
+    def _normalize_robot_cfg_schema(self, cfg: Dict[str, Any]) -> Dict[str, Any]:
+        """Normalize config so cuRobo builds expecting robot_cfg.kinematics can still work.
+
+        We have seen cuRobo versions that expect different schemas:
+        - robot_cfg.kinematics.{urdf_path, base_link, ee_link, cspace...}
+        - robot_cfg.kin_chain.{urdf_path, base_link, ee_link, joint_names...}
+
+        This function ensures that if kin_chain exists but kinematics is missing,
+        we synthesize a minimal kinematics dict with base_link/ee_link populated.
+        """
+        try:
+            rcfg = cfg.get("robot_cfg")
+            if not isinstance(rcfg, dict):
+                return cfg
+            kin = rcfg.get("kinematics")
+            if isinstance(kin, dict) and (kin.get("base_link") or kin.get("ee_link")):
+                return cfg
+            kin_chain = rcfg.get("kin_chain")
+            if not isinstance(kin_chain, dict):
+                return cfg
+            # Build a minimal kinematics block from kin_chain.
+            kinematics = {
+                "urdf_path": kin_chain.get("urdf_path"),
+                "base_link": kin_chain.get("base_link"),
+                "ee_link": kin_chain.get("ee_link"),
+            }
+            # Preserve joint_names into cspace if present.
+            jn = kin_chain.get("joint_names")
+            if jn is not None:
+                kinematics["cspace"] = {"joint_names": jn}
+            rcfg["kinematics"] = kinematics
+            cfg["robot_cfg"] = rcfg
+            return cfg
+        except Exception:
+            return cfg
+
+    def _tensor_args_from_cfg(self, cfg: Dict[str, Any]) -> Any:
+        """Best-effort TensorDeviceType construction for cuRobo."""
+        try:
+            import torch
+            from curobo.types.tensor import TensorDeviceType  # type: ignore
+
+            ta = cfg.get("tensor_args") if isinstance(cfg, dict) else None
+            dev = None
+            if isinstance(ta, dict):
+                dev = ta.get("device", None)
+            device = torch.device(str(dev) if dev else "cuda:0")
+            return TensorDeviceType(device=device)
+        except Exception:
+            return None
+
     def _ensure_motion_gen(self) -> bool:
         if not self._available:
+            if self._unavailable_reason:
+                print(f"[MG][CUROBO_VLA][WARN] cuRobo unavailable: {self._unavailable_reason}")
             return False
         if self._mg is not None:
             return True
@@ -151,7 +213,103 @@ class CuroboVLAPlanner(BasePlanner):
                 if not isinstance(cfg_dict, dict):
                     raise ValueError("YAML root must be a dict")
                 cfg_dict = self._patch_cfg_dict(cfg_dict)
-                if hasattr(MotionGenConfig, "from_dict"):
+                cfg_dict = self._normalize_robot_cfg_schema(cfg_dict)
+                # Newer cuRobo versions (like the NVLabs repo) use MotionGenConfig.load_from_robot_config.
+                if hasattr(MotionGenConfig, "load_from_robot_config"):
+                    # Expect cfg_dict to contain robot_cfg: {kinematics: ...}
+                    robot_cfg = cfg_dict.get("robot_cfg", None)
+                    if not isinstance(robot_cfg, dict):
+                        raise ValueError("Expected 'robot_cfg' dict in YAML for MotionGenConfig.load_from_robot_config")
+                    # cuRobo expects robot_cfg to be nested under key 'robot_cfg'
+                    robot_cfg_wrapped = {"robot_cfg": robot_cfg}
+
+                    # Some cuRobo builds require base_link/base_link_name passed explicitly (not only inside YAML).
+                    base_link = None
+                    try:
+                        kin = robot_cfg.get("kinematics", None)
+                        if isinstance(kin, dict) and kin.get("base_link"):
+                            base_link = str(kin.get("base_link"))
+                    except Exception:
+                        base_link = None
+                    if base_link is None:
+                        try:
+                            kin_chain = robot_cfg.get("kin_chain", None)
+                            if isinstance(kin_chain, dict) and kin_chain.get("base_link"):
+                                base_link = str(kin_chain.get("base_link"))
+                        except Exception:
+                            base_link = None
+
+                    # One-time diagnostic to confirm which schema we ended up with.
+                    try:
+                        if getattr(self, "_printed_schema_diag", False) is False:
+                            self._printed_schema_diag = True  # type: ignore[attr-defined]
+                            kin_keys = list((robot_cfg.get("kinematics") or {}).keys()) if isinstance(robot_cfg.get("kinematics"), dict) else []
+                            kc_keys = list((robot_cfg.get("kin_chain") or {}).keys()) if isinstance(robot_cfg.get("kin_chain"), dict) else []
+                            print(f"[MG][CUROBO_VLA] robot_cfg schema: kinematics_keys={kin_keys} kin_chain_keys={kc_keys} base_link={base_link}")
+                    except Exception:
+                        pass
+
+                    # Optional world collision config: allow env var to point to cuRobo's built-in world configs.
+                    # Example:
+                    # - built-in: export CUROBO_WORLD_CFG=collision_primitives_3d.yml
+                    # - custom file: export CUROBO_WORLD_CFG=/abs/path/to/world_demo.yml
+                    try:
+                        import os
+
+                        world_cfg_name = os.environ.get("CUROBO_WORLD_CFG", "") or ""
+                    except Exception:
+                        world_cfg_name = ""
+                    world_model: Any | None = None
+                    if world_cfg_name:
+                        # If user passed an absolute/relative path, load YAML and pass as dict.
+                        if ("/" in world_cfg_name) or world_cfg_name.endswith((".yml", ".yaml")) and Path(world_cfg_name).exists():
+                            try:
+                                import yaml  # type: ignore
+
+                                world_model = yaml.safe_load(Path(world_cfg_name).read_text()) or {}
+                            except Exception:
+                                world_model = world_cfg_name
+                        else:
+                            # Otherwise treat as a built-in cuRobo world config name (relative to cuRobo's world config dir).
+                            world_model = world_cfg_name
+                    tensor_args = self._tensor_args_from_cfg(cfg_dict)
+                    ee_link = str(getattr(self.ctx, "ee_link_name", "")) or None
+
+                    # Call with best-effort signature compatibility across cuRobo versions.
+                    def _try_load_from_robot_config(payload: Dict[str, Any], *, with_tensor: bool) -> Any:
+                        kwargs: Dict[str, Any] = {"world_model": world_model}
+                        if ee_link is not None:
+                            kwargs["ee_link_name"] = ee_link
+                        if with_tensor and tensor_args is not None:
+                            kwargs["tensor_args"] = tensor_args
+                        # Try base_link variants if we have one
+                        if base_link:
+                            for key in ("base_link", "base_link_name", "robot_base_link", "robot_base_link_name"):
+                                try:
+                                    return MotionGenConfig.load_from_robot_config(payload, **{**kwargs, key: base_link})
+                                except TypeError:
+                                    # unexpected kw
+                                    continue
+                        # Fallback: no explicit base_link kw
+                        return MotionGenConfig.load_from_robot_config(payload, **kwargs)
+
+                    # Attempt wrapped + unwrapped payloads (different cuRobo builds expect different roots).
+                    tried = []
+                    last_err: Exception | None = None
+                    for payload in (robot_cfg_wrapped, robot_cfg):
+                        for with_tensor in (True, False):
+                            try:
+                                mg_cfg = _try_load_from_robot_config(payload, with_tensor=with_tensor)
+                                break
+                            except Exception as e:
+                                last_err = e
+                                tried.append((type(payload).__name__, with_tensor))
+                                mg_cfg = None
+                        if mg_cfg is not None:
+                            break
+                    if mg_cfg is None and last_err is not None:
+                        raise last_err
+                elif hasattr(MotionGenConfig, "from_dict"):
                     mg_cfg = MotionGenConfig.from_dict(cfg_dict)  # type: ignore[attr-defined]
                 else:
                     mg_cfg = MotionGenConfig(cfg_dict)  # type: ignore[call-arg]
@@ -164,6 +322,9 @@ class CuroboVLAPlanner(BasePlanner):
                         return True
                     except Exception:
                         pass
+                # IMPORTANT: if config build fails, mark unavailable so we don't retry every plan.
+                self._available = False
+                self._unavailable_reason = f"MotionGenConfig init failed: {e}"
                 print(f"[MG][CUROBO_VLA][WARN] Failed to build MotionGen config from '{cfg_path}': {e}")
                 return False
 
@@ -187,6 +348,146 @@ class CuroboVLAPlanner(BasePlanner):
             print(f"[MG][CUROBO_VLA][WARN] MotionGen init failed: {e}")
             self._mg = None
             return False
+
+    def update_world_from_prim_paths(self, *, sim, robot, prim_paths: List[str]) -> bool:
+        """Update cuRobo's internal collision world from live USD prims (best-effort).
+
+        This is the missing link between Isaac's physics scene and cuRobo's planner:
+        cuRobo plans against its own world model, so we must translate the current
+        stage obstacles into cuRobo collision primitives.
+        """
+        if not self._ensure_motion_gen():
+            return False
+        mg = self._mg
+        if mg is None:
+            return False
+
+        try:
+            from motion_generation.curobo_world import build_curobo_world_cuboids
+
+            world_model = build_curobo_world_cuboids(sim=sim, robot=robot, prim_paths=list(prim_paths))
+        except Exception as e:
+            print(f"[MG][CUROBO_VLA][WARN] Failed building cuRobo world from prims: {e}")
+            return False
+
+        # Always cache the world model; even if we can't "update" the MotionGen instance,
+        # some cuRobo versions accept a world/world_model argument at plan time.
+        self._world_model = world_model
+
+        # Best-effort across cuRobo versions/APIs.
+        try:
+            if hasattr(mg, "update_world"):
+                mg.update_world(world_model)  # type: ignore[misc]
+                return True
+        except Exception:
+            pass
+
+        try:
+            if hasattr(mg, "update_world_model"):
+                mg.update_world_model(world_model)  # type: ignore[misc]
+                return True
+        except Exception:
+            pass
+
+        try:
+            wcc = getattr(mg, "world_coll_checker", None)
+            if wcc is not None and hasattr(wcc, "update_world"):
+                wcc.update_world(world_model)  # type: ignore[misc]
+                return True
+        except Exception:
+            pass
+
+        # Avoid spamming this warning every plan loop; it can materially slow down Kit UI.
+        try:
+            if getattr(self, "_printed_no_world_update_api", False) is False:
+                self._printed_no_world_update_api = True  # type: ignore[attr-defined]
+                print("[MG][CUROBO_VLA][WARN] No compatible cuRobo world update API found on MotionGen.")
+        except Exception:
+            print("[MG][CUROBO_VLA][WARN] No compatible cuRobo world update API found on MotionGen.")
+        return False
+
+    def set_start_state(self, *, joint_pos: List[float], joint_names: Optional[List[str]]) -> None:
+        """Cache the current arm joint state for planning calls that require start_state."""
+        self._last_start_joint_pos = [float(v) for v in joint_pos]
+        self._last_joint_names = [str(n) for n in (joint_names or [])] if joint_names is not None else None
+
+    def plan_joint_trajectory(
+        self,
+        *,
+        start_joint_pos: List[float],
+        joint_names: Optional[List[str]],
+        target_pos_b: Tuple[float, float, float],
+        target_quat_b_wxyz: Optional[Tuple[float, float, float, float]],
+        pregrasp_offset_m: float,
+    ) -> Any:
+        """Plan a joint trajectory using cuRobo MotionGen (returns MotionGenResult).
+
+        This is the preferred execution path for interactive demos because MotionGenResult
+        naturally contains a joint-space interpolated trajectory (interpolated_plan).
+        """
+        if not self._ensure_motion_gen():
+            raise RuntimeError("cuRobo MotionGen unavailable")
+        # New cuRobo API: MotionGen.plan_single(start_state: JointState, goal_pose: Pose, ...)
+        try:
+            import torch
+            from curobo.types.math import Pose  # type: ignore
+            from curobo.types.state import JointState  # type: ignore
+
+            gx, gy, gz = map(float, target_pos_b)
+            goal_pos = torch.tensor([[gx, gy, gz + float(pregrasp_offset_m)]], dtype=torch.float32, device="cuda:0")
+            if target_quat_b_wxyz is None:
+                goal_quat = torch.tensor([[1.0, 0.0, 0.0, 0.0]], dtype=torch.float32, device="cuda:0")
+            else:
+                w, x, y, z = target_quat_b_wxyz
+                goal_quat = torch.tensor([[float(w), float(x), float(y), float(z)]], dtype=torch.float32, device="cuda:0")
+            goal_pose = Pose(position=goal_pos, quaternion=goal_quat)
+
+            start_state = JointState.from_position(
+                torch.tensor([start_joint_pos], dtype=torch.float32, device="cuda:0"),
+                joint_names=joint_names,
+            )
+            # plan_single signature varies; try the new API first
+            try:
+                if self._world_model is not None:
+                    # Try common kw variants across cuRobo builds.
+                    for kw in ("world_model", "world", "world_cfg"):
+                        try:
+                            result = self._mg.plan_single(  # type: ignore[call-arg]
+                                start_state=start_state,
+                                goal_pose=goal_pose,
+                                **{kw: self._world_model},
+                            )
+                            break
+                        except TypeError:
+                            result = None
+                    if result is None:
+                        result = self._mg.plan_single(start_state=start_state, goal_pose=goal_pose)  # type: ignore[call-arg]
+                else:
+                    result = self._mg.plan_single(start_state=start_state, goal_pose=goal_pose)  # type: ignore[call-arg]
+            except TypeError:
+                # world_model kw not supported
+                result = self._mg.plan_single(start_state=start_state, goal_pose=goal_pose)  # type: ignore[call-arg]
+            return result
+        except Exception as e:
+            # Fall back to older API (dict goal_pose) if present
+            try:
+                import torch
+
+                gx, gy, gz = map(float, target_pos_b)
+                goal_pos = torch.tensor([[gx, gy, gz + float(pregrasp_offset_m)]], dtype=torch.float32)
+                if target_quat_b_wxyz is None:
+                    goal_quat = torch.tensor([[1.0, 0.0, 0.0, 0.0]], dtype=torch.float32)
+                else:
+                    w, x, y, z = target_quat_b_wxyz
+                    goal_quat = torch.tensor([[float(w), float(x), float(y), float(z)]], dtype=torch.float32)
+                goal = {"position": goal_pos, "orientation": goal_quat}
+                if hasattr(self._mg, "plan_single"):
+                    return self._mg.plan_single(goal_pose=goal)
+                if hasattr(self._mg, "plan"):
+                    return self._mg.plan(goal_pose=goal)
+            except Exception:
+                pass
+            raise RuntimeError(f"cuRobo plan_joint_trajectory failed: {e}")
 
     def _extract_ee_waypoints_from_result(self, result: Any) -> List[Tuple[float, float, float]]:
         """Best-effort extraction of base-frame EE positions from cuRobo result."""
@@ -272,24 +573,19 @@ class CuroboVLAPlanner(BasePlanner):
                 lift_height_m=lift_height_m,
             )
         try:
-            import torch
-
             gx, gy, gz = map(float, target_pos_b)
-            goal_pos = torch.tensor([[gx, gy, gz + float(pregrasp_offset_m)]], dtype=torch.float32)
-            if target_quat_b_wxyz is None:
-                goal_quat = torch.tensor([[1.0, 0.0, 0.0, 0.0]], dtype=torch.float32)
-            else:
-                w, x, y, z = target_quat_b_wxyz
-                goal_quat = torch.tensor([[float(w), float(x), float(y), float(z)]], dtype=torch.float32)
+            # Prefer joint-trajectory planning if we have a cached start state.
+            if self._last_start_joint_pos is None:
+                raise RuntimeError("No cached start_state; call set_start_state(...) before planning.")
 
-            goal = {"position": goal_pos, "orientation": goal_quat}
-
-            if hasattr(self._mg, "plan_single"):
-                result = self._mg.plan_single(goal_pose=goal)
-            elif hasattr(self._mg, "plan"):
-                result = self._mg.plan(goal_pose=goal)
-            else:
-                raise RuntimeError("MotionGen has no recognized plan method")
+            joint_names = self._last_joint_names
+            result = self.plan_joint_trajectory(
+                start_joint_pos=self._last_start_joint_pos,
+                joint_names=joint_names,
+                target_pos_b=target_pos_b,
+                target_quat_b_wxyz=target_quat_b_wxyz,
+                pregrasp_offset_m=pregrasp_offset_m,
+            )
 
             if result is None:
                 raise RuntimeError("Empty cuRobo plan result")
