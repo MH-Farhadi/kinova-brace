@@ -18,6 +18,7 @@ def _prim_world_corners(prim_path: str) -> List[Tuple[float, float, float]]:
     try:
         import importlib
 
+        Usd = importlib.import_module("pxr.Usd")  # type: ignore[attr-defined]
         UsdGeom = importlib.import_module("pxr.UsdGeom")  # type: ignore[attr-defined]
         Gf = importlib.import_module("pxr.Gf")  # type: ignore[attr-defined]
         omni_usd = importlib.import_module("omni.usd")  # type: ignore[attr-defined]
@@ -30,7 +31,7 @@ def _prim_world_corners(prim_path: str) -> List[Tuple[float, float, float]]:
         return []
 
     # Note: useExtentsHint=True is typically faster and robust for authored bounds.
-    bbox_cache = UsdGeom.BBoxCache(0.0, ["default"], useExtentsHint=True)
+    bbox_cache = UsdGeom.BBoxCache(Usd.TimeCode.Default(), ["default"], useExtentsHint=True)
     bbox = bbox_cache.ComputeWorldBound(prim)  # GfBBox3d
 
     box = bbox.GetBox()  # range in bbox-local frame
@@ -79,8 +80,15 @@ def build_curobo_world_cuboids(
     robot,
     prim_paths: List[str],
     name_prefix: str = "obs",
-) -> Dict[str, Any]:
-    """Build a cuRobo world_model dict with cuboids, in base frame."""
+) -> Any:
+    """Build a cuRobo world model representing obstacles as cuboids in base frame.
+
+    Important: cuRobo MotionGen APIs differ across releases:
+    - Some versions accept a plain python dict like {"cuboid": {...}}
+    - Others expect a typed object (e.g. WorldConfig / WorldCollision) constructed from that dict.
+
+    We return the *most compatible* representation we can build at runtime.
+    """
     cuboids: Dict[str, Any] = {}
     for i, p in enumerate(list(prim_paths)):
         center_b, dims = prim_to_base_aabb(sim, robot, p)
@@ -94,6 +102,51 @@ def build_curobo_world_cuboids(
             "metadata": {"source_prim": str(p)},
         }
 
-    return {"cuboid": cuboids}
+    world_dict: Dict[str, Any] = {"cuboid": cuboids}
+
+    # Best-effort: convert dict -> cuRobo WorldConfig/WorldCollision if available.
+    # We keep imports lazy and tolerant because cuRobo package namespaces vary.
+    try:
+        import importlib
+
+        for mod_name in (
+            "curobo.geom.sdf.world",
+            "curobo.geom.world",
+            "curobo.geom.types",
+            "nvidia.curobo.geom.sdf.world",
+            "nvidia.curobo.geom.world",
+            "nvidia.curobo.geom.types",
+        ):
+            try:
+                mod = importlib.import_module(mod_name)
+            except Exception:
+                continue
+
+            # Prefer WorldConfig
+            WC = getattr(mod, "WorldConfig", None)
+            if WC is not None:
+                for ctor in ("from_dict", "load_from_dict", "from_world_dict"):
+                    fn = getattr(WC, ctor, None)
+                    if fn is not None:
+                        try:
+                            return fn(world_dict)
+                        except Exception:
+                            pass
+
+            # Some builds use WorldCollision as the type carrier
+            WCol = getattr(mod, "WorldCollision", None)
+            if WCol is not None:
+                for ctor in ("from_dict", "load_from_dict", "from_world_dict"):
+                    fn = getattr(WCol, ctor, None)
+                    if fn is not None:
+                        try:
+                            return fn(world_dict)
+                        except Exception:
+                            pass
+    except Exception:
+        pass
+
+    # Fallback: dict (still useful for some cuRobo plan_single signatures)
+    return world_dict
 
 

@@ -57,7 +57,20 @@ def main(argv: Optional[list[str]] = None) -> int:
 
     AppLauncher.add_app_launcher_args(parser)
 
+    parser.add_argument(
+        "--suppress-spam",
+        action="store_true",
+        help=(
+            "Deprecated/temporary no-op. Previous attempts to change Kit log/notification settings here can break Kit startup. "
+            "Kept for CLI compatibility."
+        ),
+    )
     args = parser.parse_args(remaining_argv)
+
+    if getattr(args, "suppress_spam", False):
+        # NOTE: Do not attempt to touch carb/omni settings here.
+        # At this point Kit may not be initialized; writing settings can corrupt Kit's internal dictionaries and crash startup.
+        print("[collect_data][WARN] --suppress-spam is currently a no-op (kept for compatibility).")
     return selected_profile.run(args)
 
 

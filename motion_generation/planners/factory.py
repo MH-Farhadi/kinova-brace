@@ -17,11 +17,10 @@ def create_planner(kind: str, *, ctx: PlannerContext) -> BasePlanner:
         # Import lazily so missing file / missing deps don't break unrelated planners.
         try:
             from .curobo import CuroboPlanner  # type: ignore
-
-            return CuroboPlanner(ctx)
         except Exception as e:
             print(f"[MG][PLANNER][WARN] Failed to create curobo planner ({e}); falling back to scripted.")
             return ScriptedPlanner(ctx)
+        return CuroboPlanner(ctx)
     if kind_l in ("lula", "lula_cspace", "lula-cspace"):
         return LulaPlanner(ctx)
     if kind_l == "scripted" or kind_l == "":

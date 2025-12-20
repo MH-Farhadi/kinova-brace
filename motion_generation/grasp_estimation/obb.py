@@ -27,6 +27,7 @@ class ObbGraspPoseProvider(GraspPoseProvider):
         - pos_w_m is rectangle center at top_z (max Z among corners)
         """
         try:
+            Usd = importlib.import_module("pxr.Usd")  # type: ignore[attr-defined]
             UsdGeom = importlib.import_module("pxr.UsdGeom")  # type: ignore[attr-defined]
             Gf = importlib.import_module("pxr.Gf")  # type: ignore[attr-defined]
             omni_usd = importlib.import_module("omni.usd")  # type: ignore[attr-defined]
@@ -38,7 +39,7 @@ class ObbGraspPoseProvider(GraspPoseProvider):
         if not prim.IsValid():
             raise RuntimeError(f"[MG][GRASP] Invalid prim path: {prim_path}")
 
-        bbox_cache = UsdGeom.BBoxCache(0.0, ["default"], useExtentsHint=True)
+        bbox_cache = UsdGeom.BBoxCache(Usd.TimeCode.Default(), ["default"], useExtentsHint=True)
         bbox = bbox_cache.ComputeWorldBound(prim)  # GfBBox3d
 
         # GfBBox3d encodes an oriented box as (GfRange3d box, GfMatrix4d transform)
@@ -88,6 +89,36 @@ class ObbGraspPoseProvider(GraspPoseProvider):
             u_minor_xy = ay_xy
             extent_minor = ly
             extent_major = lx
+
+        # Fallback for degenerate OBB (e.g. infinite thinness or projection failure)
+        # This often happens if the object is rotated such that one axis is purely vertical
+        # and the OBB computation assumes local axes align with width/height.
+        if extent_minor < 1e-4 and extent_major < 1e-4:
+            # Fall back to World AABB
+            try:
+                aligned_range = bbox.ComputeAlignedRange()
+                amn = aligned_range.GetMin()
+                amx = aligned_range.GetMax()
+                adx = float(amx[0] - amn[0])
+                ady = float(amx[1] - amn[1])
+                # Center from AABB
+                cx_a = 0.5 * (amn[0] + amx[0])
+                cy_a = 0.5 * (amn[1] + amx[1])
+                cz_a = amx[2] # Top Z
+                pos = (float(cx_a), float(cy_a), float(cz_a))
+                
+                if adx <= ady:
+                    extent_minor = adx
+                    extent_major = ady
+                    yaw = 0.0
+                else:
+                    extent_minor = ady
+                    extent_major = adx
+                    yaw = 0.5 * math.pi
+                return pos, yaw, extent_major, extent_minor
+            except Exception:
+                pass
+
         # Yaw from minor axis projection
         yaw = math.atan2(u_minor_xy[1], u_minor_xy[0]) if _len2d(u_minor_xy) > 1e-12 else 0.0
         if yaw > math.pi:

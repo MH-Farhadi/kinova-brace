@@ -429,6 +429,7 @@ class CuroboVLAPlanner(BasePlanner):
             raise RuntimeError("cuRobo MotionGen unavailable")
         # New cuRobo API: MotionGen.plan_single(start_state: JointState, goal_pose: Pose, ...)
         try:
+            import time
             import torch
             from curobo.types.math import Pose  # type: ignore
             from curobo.types.state import JointState  # type: ignore
@@ -446,27 +447,26 @@ class CuroboVLAPlanner(BasePlanner):
                 torch.tensor([start_joint_pos], dtype=torch.float32, device="cuda:0"),
                 joint_names=joint_names,
             )
-            # plan_single signature varies; try the new API first
-            try:
-                if self._world_model is not None:
-                    # Try common kw variants across cuRobo builds.
-                    for kw in ("world_model", "world", "world_cfg"):
-                        try:
-                            result = self._mg.plan_single(  # type: ignore[call-arg]
-                                start_state=start_state,
-                                goal_pose=goal_pose,
-                                **{kw: self._world_model},
-                            )
-                            break
-                        except TypeError:
-                            result = None
-                    if result is None:
-                        result = self._mg.plan_single(start_state=start_state, goal_pose=goal_pose)  # type: ignore[call-arg]
-                else:
-                    result = self._mg.plan_single(start_state=start_state, goal_pose=goal_pose)  # type: ignore[call-arg]
-            except TypeError:
-                # world_model kw not supported
+            # plan_single signature varies across cuRobo builds. We try to pass a world model if present,
+            # but always fall back to a plain plan_single call.
+            t_start = time.perf_counter()
+            result = None
+            if self._world_model is not None:
+                for kw in ("world_model", "world", "world_cfg"):
+                    try:
+                        result = self._mg.plan_single(  # type: ignore[call-arg]
+                            start_state=start_state,
+                            goal_pose=goal_pose,
+                            **{kw: self._world_model},
+                        )
+                        break
+                    except TypeError:
+                        result = None
+            if result is None:
                 result = self._mg.plan_single(start_state=start_state, goal_pose=goal_pose)  # type: ignore[call-arg]
+            t_ms = (time.perf_counter() - t_start) * 1000.0
+            if t_ms > 1.0:
+                print(f"[MG][CUROBO_VLA] plan_single time={t_ms:.1f}ms world_model={'yes' if self._world_model is not None else 'no'}")
             return result
         except Exception as e:
             # Fall back to older API (dict goal_pose) if present
