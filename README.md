@@ -126,6 +126,42 @@ python -m data_collection.collect_data \
 - `--enable_cameras`: Record camera images.
 - `--workspace-min-z`: Minimum allowed EE height (negative allows reaching surface).
 
+### 7) Data Collection (Random Objects)
+
+To run with random YCB objects instead of boxes, use `--spawn-mode usd` (or omit the arg as it is default):
+
+```bash
+python -m data_collection.collect_data \
+  --profile vla_v1 \
+  --env reach_to_grasp_VLA \
+  --control planner \
+  --planner curobo_vla \
+  --device cuda:0 \
+  --enable_cameras \
+  --log-rate-hz 10 \
+  --render-rate-hz 60 \
+  --curobo-world-from-scene \
+  --num-episodes 10 \
+  --workspace-min-z -0.02 \
+  --spawn-mode usd
+```
+
+### Customization Guide
+
+Common arguments for tuning the data collection process:
+
+| Argument | Default | Description |
+| :--- | :--- | :--- |
+| `--num-episodes` | `10` | Total number of grasp attempts to run. |
+| `--headless` | (flag) | Run without GUI (faster, good for batch collection). |
+| `--num-objects` | `5` | Number of objects to spawn per episode. |
+| `--planner` | `curobo_vla` | Planner backend (`curobo_vla`, `scripted`, `rmpflow`). |
+| `--grasp-depth` | `-0.05` | Grasp offset relative to object top (m). Increase magnitude to grasp deeper. |
+| `--lift` | `0.15` | Height to lift object after grasping (m). |
+| `--workspace-min-z` | `0.0` | Safety floor for EE. Set negative (e.g. `-0.02`) if robot can't reach table surface. |
+| `--spawn-mode` | `usd` | `usd` for random YCB objects, `box` for uniform cubes. |
+| `--box-size` | `0.05` | Size of cubes when using `--spawn-mode box`. |
+
 ## Logs
 
 - `kinova-isaac/logs/assist/`: JSONL logs and metadata emitted by the demos/data-collection scripts.
