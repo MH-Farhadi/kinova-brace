@@ -394,75 +394,39 @@ def run_grasp_loop_demo(args: argparse.Namespace) -> int:
         else:
             # Planner-driven approach + grasp
             try:
-                # Special-case curobo_v2: plan a joint-space trajectory and execute it directly.
-                if isinstance(planner, CuroboV2Planner) and hasattr(planner, "plan_joint_trajectory"):
-                    # Map planner joint names to robot joint indices
-                    # (cuRobo joint order must match the JointState order).
-                    cfg_path = str(Path(cfg_dir) / "cuRobo" / "j2n6s300.yaml")
-                    import yaml  # type: ignore
+                # For cuRobo planners: update world model and set start state before planning
+                if isinstance(planner, CuroboV2Planner):
+                    # Update cuRobo's world model with current scene obstacles
+                    if hasattr(planner, "update_world_from_prim_paths"):
+                        # Exclude target from obstacles (cuRobo should plan around obstacles, not the target)
+                        obstacle_paths = [p for p in prev_prim_paths if p != target_prim]
+                        if len(obstacle_paths) > 0:
+                            planner.update_world_from_prim_paths(sim=sim, robot=robot, prim_paths=obstacle_paths)
+                    
+                    # Set start state for planning (required by plan_to_pose_b)
+                    if hasattr(planner, "set_start_state"):
+                        # Get joint names from config
+                        cfg_path = str(Path(cfg_dir) / "cuRobo" / "j2n6s300.yaml")
+                        import yaml  # type: ignore
+                        cfg_dict = yaml.safe_load(Path(cfg_path).read_text()) or {}
+                        robot_cfg = (cfg_dict.get("robot_cfg") or {}).get("kinematics") or {}
+                        cspace = robot_cfg.get("cspace") or {}
+                        joint_names = cspace.get("joint_names") or []
+                        if isinstance(joint_names, list) and len(joint_names) > 0:
+                            # Build name->index mapping from IsaacLab articulation
+                            robot_joint_names = [str(n) for n in getattr(robot.data, "joint_names", [])]
+                            name_to_id = {n: i for i, n in enumerate(robot_joint_names)}
+                            joint_ids = []
+                            for jn in joint_names:
+                                if str(jn) in name_to_id:
+                                    joint_ids.append(int(name_to_id[str(jn)]))
+                            if len(joint_ids) == len(joint_names):
+                                # Current robot arm joint positions in cuRobo order
+                                start_q = [float(robot.data.joint_pos[0, jid].item()) for jid in joint_ids]
+                                planner.set_start_state(joint_pos=start_q, joint_names=[str(j) for j in joint_names])
 
-                    cfg_dict = yaml.safe_load(Path(cfg_path).read_text()) or {}
-                    robot_cfg = (cfg_dict.get("robot_cfg") or {}).get("kinematics") or {}
-                    cspace = robot_cfg.get("cspace") or {}
-                    joint_names = cspace.get("joint_names") or []
-                    if not isinstance(joint_names, list) or len(joint_names) == 0:
-                        raise RuntimeError("cuRobo config missing robot_cfg.kinematics.cspace.joint_names")
-
-                    # Build name->index mapping from IsaacLab articulation
-                    robot_joint_names = [str(n) for n in getattr(robot.data, "joint_names", [])]
-                    name_to_id = {n: i for i, n in enumerate(robot_joint_names)}
-                    joint_ids = []
-                    for jn in joint_names:
-                        if str(jn) not in name_to_id:
-                            raise RuntimeError(f"Robot missing joint '{jn}' required by cuRobo plan.")
-                        joint_ids.append(int(name_to_id[str(jn)]))
-
-                    # Current robot arm joint positions in cuRobo order
-                    start_q = [float(robot.data.joint_pos[0, jid].item()) for jid in joint_ids]
-
-                    res = planner.plan_joint_trajectory(
-                        start_joint_pos=start_q,
-                        joint_names=[str(j) for j in joint_names],
-                        target_pos_b=pos_b,
-                        target_quat_b_wxyz=quat_b,
-                        pregrasp_offset_m=pregrasp,
-                    )
-                    # Execute interpolated joint plan if available
-                    interp = getattr(res, "interpolated_plan", None)
-                    if interp is None or getattr(interp, "position", None) is None:
-                        raise RuntimeError("cuRobo returned no interpolated_plan to execute")
-
-                    q_traj = interp.position  # (B, T, dof) or (T, dof)
-                    import torch
-                    if isinstance(q_traj, torch.Tensor):
-                        qt = q_traj
-                        if qt.ndim == 3:
-                            qt = qt[0]
-                        q_list = qt.detach().cpu().tolist()
-                    else:
-                        q_list = list(q_traj)
-
-                    print(f"[MG][CUROBO_V2] Executing joint trajectory: steps={len(q_list)} dof={len(joint_ids)}")
-                    controller.set_mode("translate")
-                    # Hold gripper mode separately; we only drive arm joints here.
-                    for q in q_list:
-                        # Keep other joints at their current targets
-                        robot.set_joint_position_target(robot.data.joint_pos)
-                        # Set planned joint positions
-                        import torch as _torch
-                        q_t = _torch.tensor([q], dtype=robot.data.joint_pos.dtype, device=sim.device)
-                        robot.set_joint_position_target(q_t, joint_ids=joint_ids)
-                        robot.write_data_to_sim()
-                        sim.step()
-                        robot.update(dt)
-                    # After reaching pregrasp, continue with existing descend/grasp/lift logic using cartesian waypoints.
-                    waypoints = planner.plan_waypoints_b(
-                        target_pos_b=pos_b,
-                        pregrasp_offset_m=pregrasp,
-                        grasp_depth_m=grasp_depth,
-                        lift_height_m=lift_h,
-                    )
-                else:
+                # Use plan_to_pose_b which handles cuRobo failures gracefully
+                # (it will try to extract EE waypoints even from failed results)
                     if hasattr(planner, "plan_to_pose_b"):
                         waypoints = getattr(planner, "plan_to_pose_b")(
                             target_pos_b=pos_b,
