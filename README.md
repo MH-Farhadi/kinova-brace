@@ -107,7 +107,7 @@ python -m data_collection.collect_data \
   --profile vla_v1 \
   --env reach_to_grasp_VLA \
   --control planner \
-  --planner curobo_vla \
+  --planner curobo_v2 \
   --device cuda:0 \
   --enable_cameras \
   --log-rate-hz 10 \
@@ -135,7 +135,7 @@ python -m data_collection.collect_data \
   --profile vla_v1 \
   --env reach_to_grasp_VLA \
   --control planner \
-  --planner curobo_vla \
+  --planner curobo_v2 \
   --device cuda:0 \
   --enable_cameras \
   --log-rate-hz 10 \
@@ -155,7 +155,7 @@ Common arguments for tuning the data collection process:
 | `--num-episodes` | `10` | Total number of grasp attempts to run. |
 | `--headless` | (flag) | Run without GUI (faster, good for batch collection). |
 | `--num-objects` | `5` | Number of objects to spawn per episode. |
-| `--planner` | `curobo_vla` | Planner backend (`curobo_vla`, `scripted`, `rmpflow`). |
+| `--planner` | `curobo_v2` | Planner backend (`curobo_v2`, `scripted`, `rmpflow`). |
 | `--grasp-depth` | `-0.05` | Grasp offset relative to object top (m). Increase magnitude to grasp deeper. |
 | `--lift` | `0.15` | Height to lift object after grasping (m). |
 | `--workspace-min-z` | `0.0` | Safety floor for EE. Set negative (e.g. `-0.02`) if robot can't reach table surface. |

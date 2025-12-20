@@ -51,9 +51,9 @@ def add_cli_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--planner",
         type=str,
-        default="curobo_vla",
-        choices=["curobo_vla", "curobo", "lula", "rmpflow", "scripted"],
-        help="Planner backend for --control planner (default: curobo_vla)",
+        default="curobo_v2",
+        choices=["curobo_v2", "curobo", "lula", "rmpflow", "scripted"],
+        help="Planner backend for --control planner (default: curobo_v2)",
     )
     parser.add_argument("--target-label", type=str, default=None, help="Optional target object label filter")
     parser.add_argument(
@@ -627,7 +627,7 @@ def run(args: argparse.Namespace) -> int:
 
         cfg_dir = str((_Path(__file__).resolve().parents[2] / "motion_generation" / "planners" / "planners_config").resolve())
         planner = create_planner(
-            str(getattr(args, "planner", "curobo_vla")),
+            str(getattr(args, "planner", "curobo_v2")),
             ctx=PlannerContext(
                 base_frame="base_link",
                 ee_link_name=str(getattr(args, "ee_link", "j2n6s300_end_effector")),
@@ -635,7 +635,7 @@ def run(args: argparse.Namespace) -> int:
                 config_dir=cfg_dir,
             ),
         )
-        print(f"[VLA_V1][PLANNER] Control enabled. planner={getattr(args, 'planner', 'curobo_vla')} cfg_dir={cfg_dir}")
+        print(f"[VLA_V1][PLANNER] Control enabled. planner={getattr(args, 'planner', 'curobo_v2')} cfg_dir={cfg_dir}")
         grasp_provider = ObbGraspPoseProvider(align_to_min_width=True)
 
         robot_prim_path: Optional[str] = None
@@ -1089,7 +1089,7 @@ def run(args: argparse.Namespace) -> int:
 
                                     session_logger.log_event(
                                         "action_start",
-                                        {"action": "PLAN_TO_PREGRASP", "planner": str(getattr(args, "planner", "curobo_vla")), "target_prim": str(target_prim), "episode_idx": int(ep)},
+                                        {"action": "PLAN_TO_PREGRASP", "planner": str(getattr(args, "planner", "curobo_v2")), "target_prim": str(target_prim), "episode_idx": int(ep)},
                                     )
                                     waypoints = planner.plan_to_pose_b(
                                         target_pos_b=(gx, gy, gz_ee),
@@ -1114,7 +1114,7 @@ def run(args: argparse.Namespace) -> int:
 
                                     vla_planner_state["target_prim"] = target_prim
                                     vla_planner_state["lift_pt"] = lift_pt
-                                    # Last approach point should be the grasp depth point (per curobo_vla planner).
+                                    # Last approach point should be the grasp depth point (per curobo_v2 planner).
                                     try:
                                         if len(approach_pts) > 0:
                                             vla_planner_state["approach_goal_b"] = tuple(map(float, approach_pts[-1]))

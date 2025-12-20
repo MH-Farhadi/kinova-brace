@@ -20,7 +20,7 @@ from motion_generation.planners import PlannerContext, create_planner
 from controllers.input.waypoint_follower import WaypointFollowerInput  
 from motion_generation.grasp_estimation.replicator import ReplicatorGraspProvider  
 from motion_generation.mogen import MotionGenerationAgent
-from motion_generation.planners.curobo_vla import CuroboVLAPlanner
+from motion_generation.planners.curobo_v2 import CuroboV2Planner
 from utilities import (  
     enable_optional_planner_extensions,
     reset_robot_to_origin,
@@ -134,12 +134,17 @@ def run_grasp_loop_demo(args: argparse.Namespace) -> int:
         n = len(waypoints)
         print(f"[MG][PLANNER_CHECK] waypoint_count={n}")
         # Heuristic:
-        # - curobo_vla plan_to_pose_b usually returns MANY waypoints (downsampled to <=120) + final 3 appended
+        # - curobo_v2 plan_to_pose_b usually returns MANY waypoints (downsampled to <=120) + final 3 appended
         # - fallback scripted returns 3 waypoints
-        if n <= 3:
-            print("[MG][PLANNER_CHECK] Likely SCRIPTED fallback (<=3 waypoints). Check for [MG][CUROBO_VLA][WARN] logs above.")
+        if "curobo" in args.planner.lower() or "vla" in args.planner.lower():
+            if n <= 3:
+                print("[MG][PLANNER_CHECK] Likely SCRIPTED fallback (<=3 waypoints). Check for [MG][CUROBO_V2][WARN] logs above.")
+            else:
+                print("[MG][PLANNER_CHECK] Likely cuRobo trajectory (many waypoints). Check for [MG][CUROBO_V2] MotionGen initialized / Planned logs above.")
+        elif n <= 3:
+            print("[MG][PLANNER_CHECK] Likely SCRIPTED fallback (<=3 waypoints). Check for [MG][CUROBO_V2][WARN] logs above.")
         else:
-            print("[MG][PLANNER_CHECK] Likely cuRobo trajectory (many waypoints). Check for [MG][CUROBO_VLA] MotionGen initialized / Planned logs above.")
+            print("[MG][PLANNER_CHECK] Likely cuRobo trajectory (many waypoints). Check for [MG][CUROBO_V2] MotionGen initialized / Planned logs above.")
 
         try:
             simulation_app.close()
@@ -389,8 +394,8 @@ def run_grasp_loop_demo(args: argparse.Namespace) -> int:
         else:
             # Planner-driven approach + grasp
             try:
-                # Special-case curobo_vla: plan a joint-space trajectory and execute it directly.
-                if isinstance(planner, CuroboVLAPlanner) and hasattr(planner, "plan_joint_trajectory"):
+                # Special-case curobo_v2: plan a joint-space trajectory and execute it directly.
+                if isinstance(planner, CuroboV2Planner) and hasattr(planner, "plan_joint_trajectory"):
                     # Map planner joint names to robot joint indices
                     # (cuRobo joint order must match the JointState order).
                     cfg_path = str(Path(cfg_dir) / "cuRobo" / "j2n6s300.yaml")
@@ -437,7 +442,7 @@ def run_grasp_loop_demo(args: argparse.Namespace) -> int:
                     else:
                         q_list = list(q_traj)
 
-                    print(f"[MG][CUROBO_VLA] Executing joint trajectory: steps={len(q_list)} dof={len(joint_ids)}")
+                    print(f"[MG][CUROBO_V2] Executing joint trajectory: steps={len(q_list)} dof={len(joint_ids)}")
                     controller.set_mode("translate")
                     # Hold gripper mode separately; we only drive arm joints here.
                     for q in q_list:

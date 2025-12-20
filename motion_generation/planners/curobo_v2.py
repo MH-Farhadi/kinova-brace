@@ -9,7 +9,7 @@ from .scripted import ScriptedPlanner
 
 
 @dataclass
-class _CuroboVLARuntime:
+class _CuroboV2Runtime:
     """Lazy cuRobo runtime handles.
 
     We keep imports fully lazy so this module can be imported in non-Isaac Python.
@@ -19,8 +19,8 @@ class _CuroboVLARuntime:
     MotionGenConfig: Any | None = None
 
 
-class CuroboVLAPlanner(BasePlanner):
-    """cuRobo MotionGen planner wrapper intended for VLA reach-to-grasp.
+class CuroboV2Planner(BasePlanner):
+    """cuRobo MotionGen planner wrapper intended for VLA reach-to-grasp (v2).
 
     Goals:
     - Prefer cuRobo's collision-aware planning (when available/configured)
@@ -32,7 +32,7 @@ class CuroboVLAPlanner(BasePlanner):
     def __init__(self, ctx) -> None:
         super().__init__(ctx)
         self._available = True
-        self._rt = _CuroboVLARuntime()
+        self._rt = _CuroboV2Runtime()
         self._mg: Any | None = None
         self._last_cfg_path: str | None = None
         self._unavailable_reason: str | None = None
@@ -49,7 +49,7 @@ class CuroboVLAPlanner(BasePlanner):
         except Exception as e:
             self._available = False
             self._unavailable_reason = str(e)
-            print(f"[MG][CUROBO_VLA][WARN] cuRobo MotionGen is not importable; will fall back to scripted. ({e})")
+            print(f"[MG][CUROBO_V2][WARN] cuRobo MotionGen is not importable; will fall back to scripted. ({e})")
 
     def _import_motion_gen_symbols(self) -> None:
         if self._rt.MotionGen is not None and self._rt.MotionGenConfig is not None:
@@ -166,7 +166,7 @@ class CuroboVLAPlanner(BasePlanner):
         try:
             self._import_motion_gen_symbols()
         except Exception as e:
-            print(f"[MG][CUROBO_VLA][WARN] cuRobo import failed: {e}")
+            print(f"[MG][CUROBO_V2][WARN] cuRobo import failed: {e}")
             self._available = False
             return False
 
@@ -186,7 +186,7 @@ class CuroboVLAPlanner(BasePlanner):
         if not cfg_path:
             cfg_path = self._default_cfg_path() or ""
         if not cfg_path:
-            print("[MG][CUROBO_VLA][WARN] No cuRobo config found. Expected planners_config/cuRobo/j2n6s300.yaml")
+            print("[MG][CUROBO_V2][WARN] No cuRobo config found. Expected planners_config/cuRobo/j2n6s300.yaml")
             return False
 
         self._last_cfg_path = cfg_path
@@ -245,7 +245,7 @@ class CuroboVLAPlanner(BasePlanner):
                             self._printed_schema_diag = True  # type: ignore[attr-defined]
                             kin_keys = list((robot_cfg.get("kinematics") or {}).keys()) if isinstance(robot_cfg.get("kinematics"), dict) else []
                             kc_keys = list((robot_cfg.get("kin_chain") or {}).keys()) if isinstance(robot_cfg.get("kin_chain"), dict) else []
-                            print(f"[MG][CUROBO_VLA] robot_cfg schema: kinematics_keys={kin_keys} kin_chain_keys={kc_keys} base_link={base_link}")
+                            print(f"[MG][CUROBO_V2] robot_cfg schema: kinematics_keys={kin_keys} kin_chain_keys={kc_keys} base_link={base_link}")
                     except Exception:
                         pass
 
@@ -318,14 +318,14 @@ class CuroboVLAPlanner(BasePlanner):
                 if hasattr(MotionGen, "from_yaml_file"):
                     try:
                         self._mg = MotionGen.from_yaml_file(cfg_path)  # type: ignore[attr-defined]
-                        print(f"[MG][CUROBO_VLA] MotionGen initialized via from_yaml_file('{cfg_path}').")
+                        print(f"[MG][CUROBO_V2] MotionGen initialized via from_yaml_file('{cfg_path}').")
                         return True
                     except Exception:
                         pass
                 # IMPORTANT: if config build fails, mark unavailable so we don't retry every plan.
                 self._available = False
                 self._unavailable_reason = f"MotionGenConfig init failed: {e}"
-                print(f"[MG][CUROBO_VLA][WARN] Failed to build MotionGen config from '{cfg_path}': {e}")
+                print(f"[MG][CUROBO_V2][WARN] Failed to build MotionGen config from '{cfg_path}': {e}")
                 return False
 
         try:
@@ -339,13 +339,13 @@ class CuroboVLAPlanner(BasePlanner):
             except Exception:
                 do_warmup = False
             if do_warmup and hasattr(self._mg, "warmup"):
-                print("[MG][CUROBO_VLA] MotionGen warmup starting (CUROBO_WARMUP=1)...")
+                print("[MG][CUROBO_V2] MotionGen warmup starting (CUROBO_WARMUP=1)...")
                 self._mg.warmup()
-                print("[MG][CUROBO_VLA] MotionGen warmup complete.")
-            print(f"[MG][CUROBO_VLA] MotionGen initialized from '{cfg_path}'.")
+                print("[MG][CUROBO_V2] MotionGen warmup complete.")
+            print(f"[MG][CUROBO_V2] MotionGen initialized from '{cfg_path}'.")
             return True
         except Exception as e:
-            print(f"[MG][CUROBO_VLA][WARN] MotionGen init failed: {e}")
+            print(f"[MG][CUROBO_V2][WARN] MotionGen init failed: {e}")
             self._mg = None
             return False
 
@@ -367,7 +367,7 @@ class CuroboVLAPlanner(BasePlanner):
 
             world_model = build_curobo_world_cuboids(sim=sim, robot=robot, prim_paths=list(prim_paths))
         except Exception as e:
-            print(f"[MG][CUROBO_VLA][WARN] Failed building cuRobo world from prims: {e}")
+            print(f"[MG][CUROBO_V2][WARN] Failed building cuRobo world from prims: {e}")
             return False
 
         # Always cache the world model; even if we can't "update" the MotionGen instance,
@@ -401,9 +401,9 @@ class CuroboVLAPlanner(BasePlanner):
         try:
             if getattr(self, "_printed_no_world_update_api", False) is False:
                 self._printed_no_world_update_api = True  # type: ignore[attr-defined]
-                print("[MG][CUROBO_VLA][WARN] No compatible cuRobo world update API found on MotionGen.")
+                print("[MG][CUROBO_V2][WARN] No compatible cuRobo world update API found on MotionGen.")
         except Exception:
-            print("[MG][CUROBO_VLA][WARN] No compatible cuRobo world update API found on MotionGen.")
+            print("[MG][CUROBO_V2][WARN] No compatible cuRobo world update API found on MotionGen.")
         return False
 
     def set_start_state(self, *, joint_pos: List[float], joint_names: Optional[List[str]]) -> None:
@@ -466,7 +466,7 @@ class CuroboVLAPlanner(BasePlanner):
                 result = self._mg.plan_single(start_state=start_state, goal_pose=goal_pose)  # type: ignore[call-arg]
             t_ms = (time.perf_counter() - t_start) * 1000.0
             if t_ms > 1.0:
-                print(f"[MG][CUROBO_VLA] plan_single time={t_ms:.1f}ms world_model={'yes' if self._world_model is not None else 'no'}")
+                print(f"[MG][CUROBO_V2] plan_single time={t_ms:.1f}ms world_model={'yes' if self._world_model is not None else 'no'}")
             return result
         except Exception as e:
             # Fall back to older API (dict goal_pose) if present
@@ -604,10 +604,10 @@ class CuroboVLAPlanner(BasePlanner):
             ee_pts.append((gx, gy, gz + float(grasp_depth_m)))
             ee_pts.append((gx, gy, gz + float(lift_height_m)))
 
-            print(f"[MG][CUROBO_VLA] Planned to pregrasp with {len(ee_pts)} EE waypoints (cfg={self._last_cfg_path}).")
+            print(f"[MG][CUROBO_V2] Planned to pregrasp with {len(ee_pts)} EE waypoints (cfg={self._last_cfg_path}).")
             return ee_pts
         except Exception as e:
-            print(f"[MG][CUROBO_VLA][WARN] cuRobo planning failed ({e}); falling back to position waypoints.")
+            print(f"[MG][CUROBO_V2][WARN] cuRobo planning failed ({e}); falling back to position waypoints.")
             return self.plan_waypoints_b(
                 target_pos_b=target_pos_b,
                 pregrasp_offset_m=pregrasp_offset_m,

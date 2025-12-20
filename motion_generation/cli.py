@@ -82,7 +82,7 @@ def add_motion_gen_cli_args(parser: argparse.ArgumentParser) -> argparse.Argumen
         help="Target position (x y z) in base frame for --planner-check-only (meters).",
     )
     parser.add_argument("--planner", type=str, default="scripted", 
-                        choices=["scripted", "rmpflow", "curobo", "curobo_vla", "lula"], 
+                        choices=["scripted", "rmpflow", "curobo", "curobo_v2", "lula"], 
                         help="Motion planner to use")
     
     # Grasp pose estimation

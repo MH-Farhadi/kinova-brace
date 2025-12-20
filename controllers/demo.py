@@ -53,8 +53,8 @@ def main():
         from environments.reach_to_grasp.config import DEFAULT_SCENE, DEFAULT_CAMERA
         from environments.reach_to_grasp.utils import design_scene
     except Exception:
-        from ..environments.reach_to_grasp.config import DEFAULT_SCENE, DEFAULT_CAMERA  # type: ignore
-        from ..environments.reach_to_grasp.utils import design_scene  # type: ignore
+        from environments.reach_to_grasp.config import DEFAULT_SCENE, DEFAULT_CAMERA  # type: ignore
+        from environments.reach_to_grasp.utils import design_scene  # type: ignore
 
     sim_cfg = sim_utils.SimulationCfg(device=args_cli.device)
     sim = sim_utils.SimulationContext(sim_cfg)
