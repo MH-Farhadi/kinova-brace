@@ -30,6 +30,17 @@ def add_motion_gen_cli_args(parser: argparse.ArgumentParser) -> argparse.Argumen
     parser.add_argument("--target-label", type=str, default=None, help="Optional target object label filter")
     parser.add_argument("--objects-dataset", type=str, nargs="*", default=[], help="Object dataset directories")
     parser.add_argument("--num-objects", type=int, default=1, help="Number of objects to spawn per episode")
+    parser.add_argument(
+        "--spawn-primitives",
+        action="store_true",
+        help="Spawn simple primitive obstacles (cuboids) locally instead of loading object assets from Nucleus/datasets.",
+    )
+    parser.add_argument(
+        "--num-primitives",
+        type=int,
+        default=2,
+        help="Number of primitive obstacles to spawn when --spawn-primitives is set.",
+    )
     
     # Object spawning bounds
     parser.add_argument("--spawn-min", type=float, nargs=3, default=[0.30, -0.20, 0.02], 
@@ -49,9 +60,29 @@ def add_motion_gen_cli_args(parser: argparse.ArgumentParser) -> argparse.Argumen
     
     # Motion planning configuration
     parser.add_argument("--pregrasp", type=float, default=0.10, help="Pre-grasp offset distance (m)")
+    parser.add_argument(
+        "--grasp-depth",
+        type=float,
+        default=-0.04,
+        help="Vertical offset applied at grasp (meters, relative to target z in base frame). "
+             "Use a small negative value to descend below the object's top surface before closing.",
+    )
     parser.add_argument("--lift", type=float, default=0.15, help="Lift height after grasp (m)")
+    parser.add_argument(
+        "--planner-check-only",
+        action="store_true",
+        help="Initialize the selected planner and run a single plan_to_pose_b() smoke test, then exit. "
+             "Useful to verify cuRobo is actually used vs falling back, without spawning any objects.",
+    )
+    parser.add_argument(
+        "--planner-check-target-b",
+        type=float,
+        nargs=3,
+        default=[0.45, 0.0, 0.15],
+        help="Target position (x y z) in base frame for --planner-check-only (meters).",
+    )
     parser.add_argument("--planner", type=str, default="scripted", 
-                        choices=["scripted", "rmpflow", "curobo", "lula"], 
+                        choices=["scripted", "rmpflow", "curobo", "curobo_v2", "lula"], 
                         help="Motion planner to use")
     
     # Grasp pose estimation

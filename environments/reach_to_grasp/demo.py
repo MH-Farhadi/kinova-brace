@@ -79,10 +79,10 @@ def main():
         from environments.utils.object_loader import ObjectLoader, ObjectLoaderConfig, SpawnBounds
         from environments.utils.physix import PhysicsConfig, apply_to_simulation_cfg, object_loader_kwargs_from_physix
     except Exception:
-        from ..environments.reach_to_grasp.config import DEFAULT_SCENE, DEFAULT_CAMERA  # type: ignore
-        from ..environments.reach_to_grasp.utils import design_scene  # type: ignore
-        from ..environments.utils.object_loader import ObjectLoader, ObjectLoaderConfig, SpawnBounds  # type: ignore
-        from ..environments.utils.physix import PhysicsConfig, apply_to_simulation_cfg, object_loader_kwargs_from_physix  # type: ignore
+        from environments.reach_to_grasp.config import DEFAULT_SCENE, DEFAULT_CAMERA  # type: ignore
+        from environments.reach_to_grasp.utils import design_scene  # type: ignore
+        from environments.utils.object_loader import ObjectLoader, ObjectLoaderConfig, SpawnBounds  # type: ignore
+        from environments.utils.physix import PhysicsConfig, apply_to_simulation_cfg, object_loader_kwargs_from_physix  # type: ignore
 
     # Setup simulation with physics config
     phys = PhysicsConfig(device=args_cli.device)
