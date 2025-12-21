@@ -13,6 +13,7 @@ def compute_object_topdown_grasp_pose_w(*, prim_path: str) -> Tuple[Tuple[float,
     Orientation: identity quaternion (w=1) as a placeholder; controller can hold orientation.
     """
     # Lazy imports to require active USD/Kit
+    Usd = __import__("pxr.Usd", fromlist=["Usd"]).Usd
     UsdGeom = __import__("pxr.UsdGeom", fromlist=["UsdGeom"]).UsdGeom
     omni_usd = __import__("omni.usd", fromlist=["get_context"])  # type: ignore[attr-defined]
 
@@ -21,7 +22,7 @@ def compute_object_topdown_grasp_pose_w(*, prim_path: str) -> Tuple[Tuple[float,
     if not prim.IsValid():
         raise RuntimeError(f"Invalid prim path for grasp estimation: {prim_path}")
 
-    bbox_cache = UsdGeom.BBoxCache(0.0, ["default"], useExtentsHint=True)
+    bbox_cache = UsdGeom.BBoxCache(Usd.TimeCode.Default(), ["default"], useExtentsHint=True)
     bbox = bbox_cache.ComputeWorldBound(prim)
     rng = bbox.ComputeAlignedRange()
     # min/max as GfVec3d; convert to floats

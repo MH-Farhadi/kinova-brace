@@ -29,15 +29,11 @@ robot_cfg:
     lock_joints: null
     extra_links: null
 
-    # Collision model (optional; keep null to use defaults or meshes)
-    collision_link_names:
-      - "j2n6s300_link_base"
-      - "j2n6s300_link_1"
-      - "j2n6s300_link_2"
-      - "j2n6s300_link_3"
-      - "j2n6s300_link_4"
-      - "j2n6s300_link_5"
-      - "j2n6s300_link_6"
+    # Collision model:
+    # IMPORTANT: Some cuRobo builds error if collision_link_names is provided but collision_spheres is null.
+    # For maximum compatibility, keep collision_link_names unset and let cuRobo infer collision geometry
+    # from the URDF / defaults, unless you provide an explicit sphere model.
+    collision_link_names: null
     collision_spheres: null
     collision_sphere_buffer: 0.005
     extra_collision_spheres: {}
@@ -76,7 +72,8 @@ ik_solver:
 # Graph planner (sampling-based) parameters
 graph_planner:
   type: "rrt_connect"
-  max_planning_time_s: 2.0
+  # Keep interactive runs responsive (lower = less UI lag if planning is hard)
+  max_planning_time_s: 0.5
   max_nodes: 2048
   connect_radius: 0.25
 
@@ -122,98 +119,13 @@ finetune_trajopt_solver:
     jerk: 0.001
 
 # Seed counts for different phases
-graph_seeds: 8
-trajopt_seeds: 4
-noisy_trajopt_seeds: 8
-batch_ik_seeds: 64
-batch_trajopt_seeds: 32
+graph_seeds: 4
+trajopt_seeds: 2
+noisy_trajopt_seeds: 4
+batch_ik_seeds: 32
+batch_trajopt_seeds: 16
 
 # Interpolation
 interpolation_type: "linear"
 interpolation_steps: 48
 partial_ik_iters: 4
-
-###############################################################################
-# cuRobo MotionGen configuration for Kinova JACO2 (j2n6s300)
-#
-# IMPORTANT:
-# - Verify 'urdf_path' exists on your machine (URDF preferred). If you don't have a URDF,
-#   you can export one or point to a USD via your cuRobo build if supported.
-# - Joint names and end effector link must match your robot asset.
-# - This file is a baseline; tune limits/tolerances to your hardware/sim needs.
-###############################################################################
-
-robot_cfg:
-  # Kinematic chain description
-  kin_chain:
-    urdf_path: "<SET_ABSOLUTE_PATH_TO_J2N6S300_URDF>"
-    base_link: "j2n6s300_link_base"
-    ee_link: "j2n6s300_end_effector"
-    joint_names:
-      - "j2n6s300_joint_1"
-      - "j2n6s300_joint_2"
-      - "j2n6s300_joint_3"
-      - "j2n6s300_joint_4"
-      - "j2n6s300_joint_5"
-      - "j2n6s300_joint_6"
-    # Optional initial posture (radians)
-    q_init: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
-
-  # Joint limits (example conservative values; replace with accurate ones)
-  kin_limits:
-    velocity:
-      default: 1.0             # rad/s
-      per_joint: [1.0, 1.0, 1.0, 1.0, 1.5, 1.5]
-    acceleration:
-      default: 2.0             # rad/s^2
-      per_joint: [2.0, 2.0, 2.0, 2.0, 3.0, 3.0]
-    jerk:
-      default: 20.0            # rad/s^3
-    position:
-      # Optional hard joint bounds (rad). If omitted, cuRobo may read from URDF.
-      # lower: [-3.14, -3.14, -3.14, -3.14, -3.14, -3.14]
-      # upper: [ 3.14,  3.14,  3.14,  3.14,  3.14,  3.14]
-
-  # Optional self-collision model (spheres or meshes)
-  # collision_model:
-  #   type: "spheres"
-  #   file: "<path_to_sphere_model_yaml>"
-
-world_cfg:
-  # Add environment collision objects if desired; leave empty to start.
-  # You can inject dynamic scene from USD in code instead of listing here.
-  obstacles: []
-
-motion_gen_cfg:
-  # Time discretization and horizon for trajectory optimization
-  dt_trajopt: 0.02
-  horizon_steps: 64
-
-  # Seeds/attempts
-  num_seeds: 4
-  max_attempts: 2
-
-  # Collision and feasibility
-  collision_check: true
-  self_collision_check: true
-  min_clearance_m: 0.01
-
-  # Goal tolerances
-  position_tolerance_m: 0.005
-  orientation_tolerance_rad: 0.087  # ~5 degrees
-
-  # Smoothing/weights (tune as needed)
-  weights:
-    position: 1.0
-    orientation: 0.5
-    velocity: 0.01
-    acceleration: 0.01
-    jerk: 0.001
-
-  # IK parameters (if used internally)
-  ik:
-    max_iters: 100
-    tol_pos_m: 0.001
-    tol_ori_rad: 0.01
-
-

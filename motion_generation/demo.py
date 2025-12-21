@@ -20,7 +20,8 @@ from motion_generation.planners import PlannerContext, create_planner
 from controllers.input.waypoint_follower import WaypointFollowerInput  
 from motion_generation.grasp_estimation.replicator import ReplicatorGraspProvider  
 from motion_generation.mogen import MotionGenerationAgent
-from utils import (  
+from motion_generation.planners.curobo_v2 import CuroboV2Planner
+from utilities import (  
     enable_optional_planner_extensions,
     reset_robot_to_origin,
     get_ee_pos_base_frame,
@@ -75,7 +76,8 @@ def run_grasp_loop_demo(args: argparse.Namespace) -> int:
     controller = CartesianVelocityJogController(ctrl_cfg, num_envs=1, device=str(sim.device))
 
     # Planner
-    cfg_dir = str((Path(__file__).resolve().parent / "motion_generation_config").resolve())
+    # Planner configs live under: motion_generation/planners/planners_config/
+    cfg_dir = str((Path(__file__).resolve().parent / "planners" / "planners_config").resolve())
     planner = create_planner(
         str(getattr(args, "planner", "scripted")),
         ctx=PlannerContext(
@@ -86,8 +88,72 @@ def run_grasp_loop_demo(args: argparse.Namespace) -> int:
         ),
     )
 
+    # Planner smoke test mode: initialize planner and run a single plan, then exit.
+    # This avoids object spawning / Nucleus asset enumeration so you can quickly confirm
+    # whether cuRobo is being used or whether the planner falls back to scripted.
+    if bool(getattr(args, "planner_check_only", False)):
+        try:
+            target_b = tuple(getattr(args, "planner_check_target_b", [0.45, 0.0, 0.15]))
+            target_pos_b = (float(target_b[0]), float(target_b[1]), float(target_b[2]))
+        except Exception:
+            target_pos_b = (0.45, 0.0, 0.15)
+
+        print(
+            f"[MG][PLANNER_CHECK] planner={getattr(args, 'planner', 'scripted')} "
+            f"planner_type={type(planner).__name__} cfg_dir={cfg_dir} target_pos_b={target_pos_b}"
+        )
+        # Helpful internal state for cuRobo planners
+        try:
+            if hasattr(planner, "_available"):
+                print(f"[MG][PLANNER_CHECK] planner._available={getattr(planner, '_available')}")
+            if hasattr(planner, "_last_cfg_path"):
+                print(f"[MG][PLANNER_CHECK] planner._last_cfg_path={getattr(planner, '_last_cfg_path')}")
+        except Exception:
+            pass
+        waypoints = []
+        try:
+            if hasattr(planner, "plan_to_pose_b"):
+                waypoints = planner.plan_to_pose_b(
+                    target_pos_b=target_pos_b,
+                    target_quat_b_wxyz=(1.0, 0.0, 0.0, 0.0),
+                    pregrasp_offset_m=float(getattr(args, "pregrasp", 0.10)),
+                    grasp_depth_m=0.0,
+                    lift_height_m=float(getattr(args, "lift", 0.15)),
+                )
+            else:
+                waypoints = planner.plan_waypoints_b(
+                    target_pos_b=target_pos_b,
+                    pregrasp_offset_m=float(getattr(args, "pregrasp", 0.10)),
+                    grasp_depth_m=0.0,
+                    lift_height_m=float(getattr(args, "lift", 0.15)),
+                )
+        except Exception as e:
+            print(f"[MG][PLANNER_CHECK][WARN] Planning call failed: {e}")
+            waypoints = []
+
+        n = len(waypoints)
+        print(f"[MG][PLANNER_CHECK] waypoint_count={n}")
+        # Heuristic:
+        # - curobo_v2 plan_to_pose_b usually returns MANY waypoints (downsampled to <=120) + final 3 appended
+        # - fallback scripted returns 3 waypoints
+        if "curobo" in args.planner.lower() or "vla" in args.planner.lower():
+            if n <= 3:
+                print("[MG][PLANNER_CHECK] Likely SCRIPTED fallback (<=3 waypoints). Check for [MG][CUROBO_V2][WARN] logs above.")
+            else:
+                print("[MG][PLANNER_CHECK] Likely cuRobo trajectory (many waypoints). Check for [MG][CUROBO_V2] MotionGen initialized / Planned logs above.")
+        elif n <= 3:
+            print("[MG][PLANNER_CHECK] Likely SCRIPTED fallback (<=3 waypoints). Check for [MG][CUROBO_V2][WARN] logs above.")
+        else:
+            print("[MG][PLANNER_CHECK] Likely cuRobo trajectory (many waypoints). Check for [MG][CUROBO_V2] MotionGen initialized / Planned logs above.")
+
+        try:
+            simulation_app.close()
+        except Exception:
+            pass
+        return 0
+
     # Grasp provider selection
-    default_rep_yaml = str((Path(__file__).resolve().parent / "motion_generation_config" / "gripper_configs" / "j2n6s300_topdown.yaml").resolve())
+    default_rep_yaml = str((Path(cfg_dir) / "gripper_configs" / "j2n6s300_topdown.yaml").resolve())
     grasp_kind = str(getattr(args, "grasp", "obb")).lower()
     rep_yaml = getattr(args, "rep_config_yaml", default_rep_yaml if grasp_kind == "replicator" else None)
     grasp_provider = None
@@ -116,7 +182,11 @@ def run_grasp_loop_demo(args: argparse.Namespace) -> int:
 
     # Object loader defaults
     dataset_dirs = [str(d) for d in getattr(args, "objects_dataset", [])]
-    if len(dataset_dirs) == 0:
+    use_prims = bool(getattr(args, "spawn_primitives", False))
+    if use_prims:
+        dataset_dirs = []
+        print("[MG] Object spawning: primitives (no Nucleus/network).")
+    elif len(dataset_dirs) == 0:
         try:
             from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR  # type: ignore
             ycb_dir = f"{ISAAC_NUCLEUS_DIR}/Props/YCB"
@@ -127,51 +197,49 @@ def run_grasp_loop_demo(args: argparse.Namespace) -> int:
     else:
         print(f"[MG] Using custom object datasets: {dataset_dirs}")
     
-    phys_loader_kwargs = object_loader_kwargs_from_physix(phys)
-    loader_cfg = ObjectLoaderConfig(
-        dataset_dirs=dataset_dirs,
-        bounds=SpawnBounds(min_xyz=tuple(args.spawn_min), max_xyz=tuple(args.spawn_max)),
-        min_distance=float(getattr(args, "min_distance", 0.1)),
-        uniform_scale_range=(
-            (float(args.scale_min), float(args.scale_max))
-            if getattr(args, "scale_min", None) is not None and getattr(args, "scale_max", None) is not None
-            else None
-        ),
-        include_labels=[
-            # "banana",
-            "bleach_cleanser",
-            # "bowl",
-            # "cracker_box",
-            # "extra_large_clamp",
-            # "foam_brick",
-            "gelatin_box",
-            # "large_clamp",
-            # "large_marker",
-            "master_chef_can",
-            "mug",
-            "mustard_bottle",
-            # "pitcher_base",
-            "potted_meat_can",
-            # "power_drill",
-            "pudding_box",
-            # "scissors",
-            "sugar_box",
-            "tomato_soup_can",
-            "tuna_fish_can",
-            # "wood_block",
-        ],
-        **phys_loader_kwargs,
-    )
-    loader = ObjectLoader(loader_cfg)
+    loader = None
+    if not use_prims:
+        phys_loader_kwargs = object_loader_kwargs_from_physix(phys)
+        loader_cfg = ObjectLoaderConfig(
+            dataset_dirs=dataset_dirs,
+            bounds=SpawnBounds(min_xyz=tuple(args.spawn_min), max_xyz=tuple(args.spawn_max)),
+            min_distance=float(getattr(args, "min_distance", 0.1)),
+            uniform_scale_range=(
+                (float(args.scale_min), float(args.scale_max))
+                if getattr(args, "scale_min", None) is not None and getattr(args, "scale_max", None) is not None
+                else None
+            ),
+            include_labels=[
+                "bleach_cleanser",
+                "gelatin_box",
+                "master_chef_can",
+                "mug",
+                "mustard_bottle",
+                "potted_meat_can",
+                "pudding_box",
+                "sugar_box",
+                "tomato_soup_can",
+                "tuna_fish_can",
+            ],
+            **phys_loader_kwargs,
+        )
+        loader = ObjectLoader(loader_cfg)
 
     # High-level motion generation helper for label-based target selection and grasp queries
+    if loader is None:
+        class _DummyLoader:
+            def get_last_spawn_labels(self):
+                return {}
+        loader_for_agent = _DummyLoader()
+    else:
+        loader_for_agent = loader
     agent = MotionGenerationAgent(
         sim=sim,
         robot=robot,
         controller=controller,
         planner=planner,
         grasp_provider=grasp_provider,
-        loader=loader,
+        loader=loader_for_agent,  # type: ignore[arg-type]
         robot_prim_path=robot_prim_path,
     )
 
@@ -179,6 +247,7 @@ def run_grasp_loop_demo(args: argparse.Namespace) -> int:
     prev_prim_paths: List[str] = []
     num_episodes = int(getattr(args, "num_episodes", 3))
     pregrasp = float(getattr(args, "pregrasp", 0.10))
+    grasp_depth = float(getattr(args, "grasp_depth", -0.04))
     lift_h = float(getattr(args, "lift", 0.15))
     tolerance_m = float(getattr(args, "tolerance", 0.005))
     planner_kind = str(getattr(args, "planner", "scripted")).lower()
@@ -209,12 +278,62 @@ def run_grasp_loop_demo(args: argparse.Namespace) -> int:
             n = int(getattr(args, "num_objects", 1))
         except Exception:
             n = 1
-        try:
-            prev_prim_paths = loader.spawn(parent_prim_path="/World/Origin1", num_objects=n)
-            print(f"[MG][EP] Spawned objects: {prev_prim_paths}")
-        except Exception as e:
-            print(f"[MG][EP][WARN] Object spawn failed: {e}")
+        if bool(getattr(args, "spawn_primitives", False)):
             prev_prim_paths = []
+            try:
+                import isaaclab.sim as sim_utils
+                prim_utils = importlib.import_module("isaacsim.core.utils.prims")
+                prim_utils.create_prim("/World/Origin1/Prims", "Xform")
+                # Spawn obstacles to match the cuRobo world config in this repo
+                # (motion_generation/planners/planners_config/cuRobo/world_demo.yml).
+                # Positions are defined in base frame; convert to world by adding robot base height.
+                base_h = float(getattr(DEFAULT_SCENE, "robot_base_height", 0.8))
+                obstacles_b = [
+                    ("Obstacle_00", (0.45, 0.00, 0.10), (0.10, 0.10, 0.20)),
+                    ("Obstacle_01", (0.40, -0.15, 0.08), (0.08, 0.20, 0.12)),
+                ]
+                # Always spawn a separate visible target that is NOT part of the cuRobo world config.
+                target_b = ("Target", (0.55, 0.15, 0.08), (0.06, 0.06, 0.10))
+
+                # Obstacles (red)
+                num_obs = int(getattr(args, "num_primitives", len(obstacles_b)))
+                for name, pos_b, dims in obstacles_b[: max(0, num_obs)]:
+                    p = f"/World/Origin1/Prims/{name}"
+                    box_cfg = sim_utils.CuboidCfg(
+                        size=tuple(dims),
+                        visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.9, 0.2, 0.2)),
+                        collision_props=sim_utils.CollisionPropertiesCfg(),
+                        rigid_props=sim_utils.RigidBodyPropertiesCfg(),
+                    )
+                    x, y, z = float(pos_b[0]), float(pos_b[1]), float(pos_b[2] + base_h)
+                    box_cfg.func(p, box_cfg, translation=(x, y, z))
+                    prev_prim_paths.append(p)
+
+                # Target (green)
+                t_name, t_pos_b, t_dims = target_b
+                t_path = f"/World/Origin1/Prims/{t_name}"
+                t_cfg = sim_utils.CuboidCfg(
+                    size=tuple(t_dims),
+                    visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.2, 0.9, 0.2)),
+                    collision_props=sim_utils.CollisionPropertiesCfg(),
+                    rigid_props=sim_utils.RigidBodyPropertiesCfg(),
+                )
+                tx, ty, tz = float(t_pos_b[0]), float(t_pos_b[1]), float(t_pos_b[2] + base_h)
+                t_cfg.func(t_path, t_cfg, translation=(tx, ty, tz))
+                prev_prim_paths.append(t_path)
+
+                print(f"[MG][EP] Spawned primitive scene: obstacles={num_obs}, target={t_path}")
+            except Exception as e:
+                print(f"[MG][EP][WARN] Primitive spawn failed: {e}")
+                prev_prim_paths = []
+        else:
+            try:
+                assert loader is not None
+                prev_prim_paths = loader.spawn(parent_prim_path="/World/Origin1", num_objects=n)
+                print(f"[MG][EP] Spawned objects: {prev_prim_paths}")
+            except Exception as e:
+                print(f"[MG][EP][WARN] Object spawn failed: {e}")
+                prev_prim_paths = []
         if len(prev_prim_paths) == 0:
             print("[MG][EP] No objects spawned; skipping episode.")
             continue
@@ -227,8 +346,15 @@ def run_grasp_loop_demo(args: argparse.Namespace) -> int:
         if stabilize_steps > 0:
             stabilize_with_hold(sim, robot, stabilize_steps, dt)
 
-        # Randomly select a target object from the spawned set and compute latest grasp pose
-        target_prim = random.choice(prev_prim_paths)
+        # Select target
+        target_prim = None
+        if bool(getattr(args, "spawn_primitives", False)):
+            # Prefer the explicitly spawned target prim
+            cand = "/World/Origin1/Prims/Target"
+            if cand in prev_prim_paths:
+                target_prim = cand
+        if target_prim is None:
+            target_prim = random.choice(prev_prim_paths)
         pos_w, quat_wxyz_w, pos_b, quat_b = agent.compute_current_grasp_for_prim(target_prim)
         print(f"[MG][EP] Target prim: {target_prim}")
         print(f"[MG][EP] Grasp pose (world): pos={pos_w} quat(wxyz)={quat_wxyz_w}")
@@ -268,22 +394,55 @@ def run_grasp_loop_demo(args: argparse.Namespace) -> int:
         else:
             # Planner-driven approach + grasp
             try:
-                if hasattr(planner, "plan_to_pose_b"):
-                    waypoints: List[Tuple[float, float, float]] = getattr(planner, "plan_to_pose_b")(
-                        target_pos_b=pos_b,
-                        target_quat_b_wxyz=quat_b,
-                        pregrasp_offset_m=pregrasp,
-                        grasp_depth_m=0.00,
-                        lift_height_m=lift_h,
-                    )
-                else:
-                    raise RuntimeError("6D planning interface not available")
+                # For cuRobo planners: update world model and set start state before planning
+                if isinstance(planner, CuroboV2Planner):
+                    # Update cuRobo's world model with current scene obstacles
+                    if hasattr(planner, "update_world_from_prim_paths"):
+                        # Exclude target from obstacles (cuRobo should plan around obstacles, not the target)
+                        obstacle_paths = [p for p in prev_prim_paths if p != target_prim]
+                        if len(obstacle_paths) > 0:
+                            planner.update_world_from_prim_paths(sim=sim, robot=robot, prim_paths=obstacle_paths)
+                    
+                    # Set start state for planning (required by plan_to_pose_b)
+                    if hasattr(planner, "set_start_state"):
+                        # Get joint names from config
+                        cfg_path = str(Path(cfg_dir) / "cuRobo" / "j2n6s300.yaml")
+                        import yaml  # type: ignore
+                        cfg_dict = yaml.safe_load(Path(cfg_path).read_text()) or {}
+                        robot_cfg = (cfg_dict.get("robot_cfg") or {}).get("kinematics") or {}
+                        cspace = robot_cfg.get("cspace") or {}
+                        joint_names = cspace.get("joint_names") or []
+                        if isinstance(joint_names, list) and len(joint_names) > 0:
+                            # Build name->index mapping from IsaacLab articulation
+                            robot_joint_names = [str(n) for n in getattr(robot.data, "joint_names", [])]
+                            name_to_id = {n: i for i, n in enumerate(robot_joint_names)}
+                            joint_ids = []
+                            for jn in joint_names:
+                                if str(jn) in name_to_id:
+                                    joint_ids.append(int(name_to_id[str(jn)]))
+                            if len(joint_ids) == len(joint_names):
+                                # Current robot arm joint positions in cuRobo order
+                                start_q = [float(robot.data.joint_pos[0, jid].item()) for jid in joint_ids]
+                                planner.set_start_state(joint_pos=start_q, joint_names=[str(j) for j in joint_names])
+
+                # Use plan_to_pose_b which handles cuRobo failures gracefully
+                # (it will try to extract EE waypoints even from failed results)
+                    if hasattr(planner, "plan_to_pose_b"):
+                        waypoints = getattr(planner, "plan_to_pose_b")(
+                            target_pos_b=pos_b,
+                            target_quat_b_wxyz=quat_b,
+                            pregrasp_offset_m=pregrasp,
+                            grasp_depth_m=grasp_depth,
+                            lift_height_m=lift_h,
+                        )
+                    else:
+                        raise RuntimeError("6D planning interface not available")
             except Exception as e:
                 print(f"[MG][EP][WARN] plan_to_pose_b failed ({e}); using position-only waypoints.")
                 waypoints = planner.plan_waypoints_b(
                     target_pos_b=pos_b,
                     pregrasp_offset_m=pregrasp,
-                    grasp_depth_m=0.00,
+                    grasp_depth_m=grasp_depth,
                     lift_height_m=lift_h,
                 )
             print(f"[MG][EP] Waypoints: {waypoints}")

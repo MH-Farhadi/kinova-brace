@@ -28,6 +28,6 @@ packages = [
   "motion_generation",
   "motion_generation.grasp_estimation",
   "motion_generation.planners",
-  "utils",
+  "utilities",
 ]
 include-package-data = true 

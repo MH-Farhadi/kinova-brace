@@ -57,3 +57,5 @@ def design_scene(scene_cfg: "SceneConfig") -> tuple[dict, list[list[float]]]:
     return scene_entities, origins
 
 
+
+
