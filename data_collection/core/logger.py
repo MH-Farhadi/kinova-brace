@@ -20,6 +20,7 @@ class TickLoggingConfig:
     workspace_max: Optional[Tuple[Optional[float], Optional[float], Optional[float]]] = None
     ee_link_name: str = "j2n6s300_end_effector"
     arm_joint_regex: str = "j2n6s300_joint_[1-6]"
+    log_joint_data: bool = False  # Enable joint positions/velocities logging (for VLA training)
 
 
 class SessionLogWriter:
@@ -229,11 +230,31 @@ class SessionLogWriter:
             "time_since_last_safety_ms": 0 if self._last_safety_ms is None else max(0, now_ms - self._last_safety_ms),
         }
 
-        record = {
-            "t_ms": now_ms,
-            "tick_idx": self.tick_idx,
-            "robot": {
-                "ee_pose_w": {
+        # Build robot record with base fields
+        robot_record = {
+            "ee_pose_w": {
+                "position_m": [float(ee_pose_w[0, 0].item()), float(ee_pose_w[0, 1].item()), float(ee_pose_w[0, 2].item())],
+                "orientation_wxyz": [
+                    float(ee_pose_w[0, 3].item()),
+                    float(ee_pose_w[0, 4].item()),
+                    float(ee_pose_w[0, 5].item()),
+                    float(ee_pose_w[0, 6].item()),
+                ],
+            },
+            "ee_pose_b": {
+                "position_m": [float(ee_pos_b[0, 0].item()), float(ee_pos_b[0, 1].item()), float(ee_pos_b[0, 2].item())],
+                "orientation_wxyz": [
+                    float(ee_quat_b[0, 0].item()),
+                    float(ee_quat_b[0, 1].item()),
+                    float(ee_quat_b[0, 2].item()),
+                    float(ee_quat_b[0, 3].item()),
+                ],
+            },
+            "ee_linear_vel_mps": [float(lin[0].item()), float(lin[1].item()), float(lin[2].item())],
+            "ee_angular_vel_rps": [float(ang[0].item()), float(ang[1].item()), float(ang[2].item())],
+            "gripper": {
+                "state": gr_state,
+                "pose_w": {
                     "position_m": [float(ee_pose_w[0, 0].item()), float(ee_pose_w[0, 1].item()), float(ee_pose_w[0, 2].item())],
                     "orientation_wxyz": [
                         float(ee_pose_w[0, 3].item()),
@@ -242,7 +263,7 @@ class SessionLogWriter:
                         float(ee_pose_w[0, 6].item()),
                     ],
                 },
-                "ee_pose_b": {
+                "pose_b": {
                     "position_m": [float(ee_pos_b[0, 0].item()), float(ee_pos_b[0, 1].item()), float(ee_pos_b[0, 2].item())],
                     "orientation_wxyz": [
                         float(ee_quat_b[0, 0].item()),
@@ -251,31 +272,46 @@ class SessionLogWriter:
                         float(ee_quat_b[0, 3].item()),
                     ],
                 },
-                "ee_linear_vel_mps": [float(lin[0].item()), float(lin[1].item()), float(lin[2].item())],
-                "ee_angular_vel_rps": [float(ang[0].item()), float(ang[1].item()), float(ang[2].item())],
-                "gripper": {
-                    "state": gr_state,
-                    "pose_w": {
-                        "position_m": [float(ee_pose_w[0, 0].item()), float(ee_pose_w[0, 1].item()), float(ee_pose_w[0, 2].item())],
-                        "orientation_wxyz": [
-                            float(ee_pose_w[0, 3].item()),
-                            float(ee_pose_w[0, 4].item()),
-                            float(ee_pose_w[0, 5].item()),
-                            float(ee_pose_w[0, 6].item()),
-                        ],
-                    },
-                    "pose_b": {
-                        "position_m": [float(ee_pos_b[0, 0].item()), float(ee_pos_b[0, 1].item()), float(ee_pos_b[0, 2].item())],
-                        "orientation_wxyz": [
-                            float(ee_quat_b[0, 0].item()),
-                            float(ee_quat_b[0, 1].item()),
-                            float(ee_quat_b[0, 2].item()),
-                            float(ee_quat_b[0, 3].item()),
-                        ],
-                    },
-                },
-                "safety": {"jacobian_s_min": s_min, "workspace_clamped_axes": clamped_axes, "near_joint_limit": near},
             },
+            "safety": {"jacobian_s_min": s_min, "workspace_clamped_axes": clamped_axes, "near_joint_limit": near},
+        }
+
+        # Add joint data if enabled (for VLA training)
+        if cfg.log_joint_data and arm_ids:
+            try:
+                # Get joint positions
+                joint_positions = [
+                    float(robot.data.joint_pos[0, jid].item()) 
+                    for jid in arm_ids
+                ]
+                joint_names = [
+                    str(robot.data.joint_names[jid]) 
+                    for jid in arm_ids
+                ]
+                
+                # Get joint velocities
+                joint_velocities = []
+                if hasattr(robot.data, "joint_vel"):
+                    joint_velocities = [
+                        float(robot.data.joint_vel[0, jid].item()) 
+                        for jid in arm_ids
+                    ]
+                else:
+                    joint_velocities = [0.0] * len(arm_ids)
+                
+                robot_record["joints"] = {
+                    "positions": joint_positions,
+                    "velocities": joint_velocities,
+                    "names": joint_names,
+                }
+            except Exception:
+                # If joint data extraction fails, skip it
+                pass
+
+        record = {
+            "t_ms": now_ms,
+            "tick_idx": self.tick_idx,
+            "robot": robot_record,
             "user": {"joystick": {"cartesian_vel_cmd": cmd6, "speed_scale": 1.0}, "mode": "velocity", "deadman": deadman},
             "objects": obj_list,
             "recency": rec,

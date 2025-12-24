@@ -95,8 +95,8 @@ def add_cli_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--ignore-grasp-orientation",
         action="store_true",
-        default=True,
-        help="Plan with position-only goals (faster/more robust than constraining EE orientation). Default: true.",
+        default=False,
+        help="Plan with position-only goals (faster/more robust than constraining EE orientation). Default: false.",
     )
     parser.add_argument("--lift", type=float, default=0.15, help="Lift height after grasp (m)")
     parser.add_argument("--tolerance", type=float, default=0.01, help="Waypoint tolerance for planner control (m)")
@@ -357,7 +357,8 @@ def run(args: argparse.Namespace) -> int:
             )
             loader = ObjectLoader(loader_cfg)
 
-        paths = loader.spawn(parent_prim_path="/World/Origin1", num_objects=int(getattr(args, "num_objects", 0)))
+        # NOTE: `--num-objects` is a shared CLI arg (see `scripts/cli.py`). Default to 4 if missing.
+        paths = loader.spawn(parent_prim_path="/World/Origin1", num_objects=int(getattr(args, "num_objects", 4)))
         try:
             prim_to_label = loader.get_last_spawn_labels()
             lbl_map = {str(p).split("/")[-1]: str(lbl) for p, lbl in prim_to_label.items()}
@@ -367,6 +368,10 @@ def run(args: argparse.Namespace) -> int:
 
     # IMPORTANT: spawn objects once up-front so planner mode has a loader + targets available.
     spawned_paths, id_to_label = _spawn_objects()
+    try:
+        print(f"[VLA_V1] Spawned {len(spawned_paths)} objects: {spawned_paths}")
+    except Exception:
+        pass
 
     def _prim_label(prim_path: str) -> str:
         """Best-effort: map a prim path to a human label using ObjectLoader's id_to_label mapping.
@@ -383,6 +388,7 @@ def run(args: argparse.Namespace) -> int:
         ep_idx: int,
         *,
         object_z_by_leaf: dict[str, float] | None = None,
+        prev_target_prim: str | None = None,
     ) -> str | None:
         """Select exactly ONE target prim for an episode (stable for that episode)."""
         if not spawned_paths:
@@ -448,7 +454,22 @@ def run(args: argparse.Namespace) -> int:
                 return random.choice(candidates)
             except Exception:
                 return candidates[0]
-        return candidates[0]
+        elif sel == "first":
+            # Proper episode-to-episode cycling (non-repeating when possible).
+            # If we have a previous target and it's still a valid candidate, pick the *next* one.
+            if len(candidates) == 0:
+                return None
+            if len(candidates) == 1:
+                return candidates[0]
+            try:
+                if prev_target_prim and str(prev_target_prim) in candidates:
+                    i = candidates.index(str(prev_target_prim))
+                    return candidates[(i + 1) % len(candidates)]
+            except Exception:
+                pass
+            # Otherwise fall back to deterministic cycle by episode index.
+            return candidates[ep_idx % len(candidates)]
+        return candidates[0] if candidates else None
 
     def _table_z() -> float:
         try:
@@ -703,7 +724,7 @@ def run(args: argparse.Namespace) -> int:
         }
     controller.set_input_provider(mux_input)
 
-    # Tracker + logger
+    # Tracker + logger (will be recreated per episode in planner mode)
     tracker = ObjectsTracker(prim_paths=spawned_paths)
     tick_cfg = TickLoggingConfig(
         log_rate_hz=int(getattr(args, "log_rate_hz", 10)),
@@ -711,7 +732,10 @@ def run(args: argparse.Namespace) -> int:
         workspace_max=getattr(controller.config.safety_cfg, "workspace_max", None),
         ee_link_name=str(getattr(args, "ee_link", "j2n6s300_end_effector")),
         arm_joint_regex=controller.config.arm_joint_regex,
+        log_joint_data=True,  # Enable joint positions/velocities for VLA training
     )
+    # Create initial logger (for non-planner modes)
+    # In planner mode, a new logger will be created for each episode
     session_logger = SessionLogWriter(root=Path(str(getattr(args, "logs_root", "logs/data_collection"))))
 
     images_dir = session_logger.root / "images"
@@ -720,16 +744,18 @@ def run(args: argparse.Namespace) -> int:
         images_dir.mkdir(exist_ok=True)
     image_format = getattr(args, "image_format", "png")
 
-    session_logger.write_metadata(
-        sim_dt=sim.get_physics_dt(),
-        physics_substeps=int(getattr(sim.cfg, "sub_steps", 4)),
-        seed=0,
-        robot_name="kinova_j2n6s300",
-        ee_link=str(getattr(args, "ee_link", "j2n6s300_end_effector")),
-        arm_joint_regex=controller.config.arm_joint_regex,
-        log_rate_hz=tick_cfg.log_rate_hz,
-        window_len_s=2.0,
-    )
+    # Write metadata only for non-planner modes (planner mode writes per episode)
+    if control_mode != "planner":
+        session_logger.write_metadata(
+            sim_dt=sim.get_physics_dt(),
+            physics_substeps=int(getattr(sim.cfg, "sub_steps", 4)),
+            seed=0,
+            robot_name="kinova_j2n6s300",
+            ee_link=str(getattr(args, "ee_link", "j2n6s300_end_effector")),
+            arm_joint_regex=controller.config.arm_joint_regex,
+            log_rate_hz=tick_cfg.log_rate_hz,
+            window_len_s=2.0,
+        )
 
     print(f"[VLA_V1] Data collection started!")
     print(f"[VLA_V1] Session directory: {session_logger.root}")
@@ -853,161 +879,217 @@ def run(args: argparse.Namespace) -> int:
                 )
     else:
         # Planner mode runs episode loops (reset + respawn) and ends each episode after lift.
+        # Create a session folder with timestamp, episodes will be subfolders inside
+        logs_root = Path(str(getattr(args, "logs_root", "logs/data_collection")))
+        from datetime import datetime
+        session_timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        session_folder = logs_root / f"session_{session_timestamp}"
+        session_folder.mkdir(parents=True, exist_ok=True)
+        
+        total_ticks = 0
+        total_images = 0
+        # Persist target choice across episodes so we can enforce "different target after reset"
+        # when multiple objects exist.
+        prev_target_prim: str | None = None
+        
         for ep in range(num_episodes):
             if not simulation_app.is_running():
+                print(f"[VLA_V1][EP] Simulation stopped, ending at episode {ep}/{num_episodes}")
                 break
 
-            # Reset sim/robot for a clean episode start.
-            _reset_sim_and_robot()
-            if camera_sensor is not None:
-                try:
-                    camera_sensor.reset()
-                except Exception:
-                    pass
-
-            # Re-randomize object poses each episode (no destroy/recreate).
-            do_respawn = bool(getattr(args, "respawn_each_episode", False)) or (
-                control_mode == "planner" and (not bool(getattr(args, "no_respawn_each_episode", False)))
-            )
-            if do_respawn:
-                _rerandomize_object_poses(spawned_paths)
-
-            # HARD reset controller + follower per episode to avoid leftover impulses after sim.reset()
+            print(f"[VLA_V1][EP] Starting episode {ep+1}/{num_episodes}")
+            
             try:
-                controller.reset(robot)
-                controller.set_mode("translate")
-            except Exception:
-                pass
-            try:
-                wp.reset()
-            except Exception:
-                pass
-            try:
-                wp.set_current_pose_b(get_ee_pos_base_frame(robot, str(getattr(args, "ee_link", "j2n6s300_end_effector"))))
-            except Exception:
-                pass
+                # Create a new session logger for each episode (separate log files)
+                # Episode folders go inside the session folder
+                session_logger = SessionLogWriter(root=session_folder, session_name=f"episode_{ep:04d}")
+                images_dir = session_logger.root / "images"
+                if camera_sensor is not None:
+                    images_dir.mkdir(exist_ok=True)
+                image_format = getattr(args, "image_format", "png")
+                images_captured_episode = 0
+                
+                # Write metadata for this episode
+                session_logger.write_metadata(
+                    sim_dt=sim.get_physics_dt(),
+                    physics_substeps=int(getattr(sim.cfg, "sub_steps", 4)),
+                    seed=0,
+                    robot_name="kinova_j2n6s300",
+                    ee_link=str(getattr(args, "ee_link", "j2n6s300_end_effector")),
+                    arm_joint_regex=controller.config.arm_joint_regex,
+                    log_rate_hz=tick_cfg.log_rate_hz,
+                    window_len_s=2.0,
+                )
 
-            # Let physics settle after reset/respawn before we select target / plan.
-            settle_steps = int(getattr(args, "settle_steps", 0))
-            if settle_steps > 0:
-                for _ in range(settle_steps):
-                    if not simulation_app.is_running():
-                        break
-                    # Keep the arm stable while the scene settles
+                # Reset sim/robot for a clean episode start.
+                _reset_sim_and_robot()
+                if camera_sensor is not None:
                     try:
-                        controller.step(robot, dt)
+                        camera_sensor.reset()
                     except Exception:
                         pass
-                    sim.step(render=False)
-                    robot.update(dt)
 
-            # Re-init per-episode follower state to avoid leftover queued waypoints/gripper commands.
-            wp.set_waypoints_b([])
-            try:
-                setattr(wp, "_gripper_queue", [])  # type: ignore[attr-defined]
-            except Exception:
-                pass
+                # Re-randomize object poses each episode (no destroy/recreate).
+                do_respawn = bool(getattr(args, "respawn_each_episode", False)) or (
+                    control_mode == "planner" and (not bool(getattr(args, "no_respawn_each_episode", False)))
+                )
+                if do_respawn:
+                    _rerandomize_object_poses(spawned_paths)
 
-            obj_z_by_leaf: dict[str, float] = {}
-            try:
-                for o in tracker.snapshot():
-                    try:
-                        obj_z_by_leaf[str(o.id)] = float(o.pose.position_m[2])
-                    except Exception:
-                        continue
-            except Exception:
-                obj_z_by_leaf = {}
-            vla_planner_state.update(
-                {
-                    "stage": "init_open",
-                    # Pick a single target ONCE per episode (do not re-select per tick).
-                    "target_prim": _select_episode_target_prim(ep, object_z_by_leaf=obj_z_by_leaf),
-                    "lift_pt": None,
-                    "approach_goal_b": None,
-                    "grasp_goal_b": None,
-                    "attempt_idx": 0,
-                    "open_left": int(getattr(args, "gripper_open_steps", 10)),
-                    "close_left": int(getattr(args, "gripper_close_steps", 60)),
-                    "stabilize_left": int(getattr(args, "stabilize_steps", 300)),
-                    "hold_after_close_left": int(getattr(args, "hold_after_close_steps", 30)),
-                    "open_queued": False,
-                    "close_queued": False,
-                    "lift_queued": False,
-                    "hold_requeue_count": 0,
-                    "approach_last_dist_m": None,
-                    "approach_stall_steps": 0,
-                    "approach_start_step": None,
-                }
-            )
-            # Print basic episode header to terminal (helps debug "repeating" confusion).
-            print(
-                f"[VLA_V1][EP] start ep={ep} target={vla_planner_state.get('target_prim')} "
-                f"label='{_prim_label(str(vla_planner_state.get('target_prim', '')))}'"
-            )
-            session_logger.log_event(
-                "episode_start",
-                {
-                    "episode_idx": int(ep),
-                    "num_objects": int(len(spawned_paths)),
-                    "target_prim": str(vla_planner_state.get("target_prim", None)),
-                    "target_label": _prim_label(str(vla_planner_state.get("target_prim", ""))),
-                },
-            )
-
-            accum = 0.0
-            steps = 0
-            while simulation_app.is_running() and steps < max_steps_ep:
-                steps += 1
-
-                # Planner-driven reach-to-grasp state machine
+                # HARD reset controller + follower per episode to avoid leftover impulses after sim.reset()
+                try:
+                    controller.reset(robot)
+                    controller.set_mode("translate")
+                except Exception:
+                    pass
+                try:
+                    wp.reset()
+                except Exception:
+                    pass
                 try:
                     wp.set_current_pose_b(get_ee_pos_base_frame(robot, str(getattr(args, "ee_link", "j2n6s300_end_effector"))))
                 except Exception:
                     pass
 
+                # Let physics settle after reset/respawn before we select target / plan.
+                settle_steps = int(getattr(args, "settle_steps", 0))
+                if settle_steps > 0:
+                    for _ in range(settle_steps):
+                        if not simulation_app.is_running():
+                            break
+                        # Keep the arm stable while the scene settles
+                        try:
+                            controller.step(robot, dt)
+                        except Exception:
+                            pass
+                        sim.step(render=False)
+                        robot.update(dt)
+
+                # Re-init per-episode follower state to avoid leftover queued waypoints/gripper commands.
+                wp.set_waypoints_b([])
                 try:
-                    stab_left = int(vla_planner_state.get("stabilize_left", 0))
-                    if stab_left > 0:
-                        vla_planner_state["stabilize_left"] = stab_left - 1
-                    else:
-                        stage = str(vla_planner_state.get("stage", "idle"))
+                    setattr(wp, "_gripper_queue", [])  # type: ignore[attr-defined]
+                except Exception:
+                    pass
 
-                        if stage == "init_open":
-                            open_left = int(vla_planner_state.get("open_left", 0))
-                            if not vla_planner_state.get("open_queued", False):
-                                session_logger.log_event("action_start", {"action": "GRIPPER_OPEN", "steps": int(open_left), "episode_idx": int(ep)})
-                                try:
-                                    controller.set_mode("gripper")
-                                    wp.queue_gripper(+1.0, steps=open_left)
-                                except Exception:
-                                    pass
-                                vla_planner_state["open_queued"] = True
-                            controller.set_mode("gripper")
-                            if open_left > 0:
-                                vla_planner_state["open_left"] = open_left - 1
-                            else:
-                                session_logger.log_event("action_end", {"action": "GRIPPER_OPEN", "episode_idx": int(ep)})
-                                vla_planner_state["stage"] = "idle"
+                obj_z_by_leaf: dict[str, float] = {}
+                try:
+                    for o in tracker.snapshot():
+                        try:
+                            obj_z_by_leaf[str(o.id)] = float(o.pose.position_m[2])
+                        except Exception:
+                            continue
+                except Exception:
+                    obj_z_by_leaf = {}
+                vla_planner_state.update(
+                    {
+                        "stage": "init_open",
+                        # Pick a single target ONCE per episode (do not re-select per tick).
+                            "target_prim": _select_episode_target_prim(
+                                ep, object_z_by_leaf=obj_z_by_leaf, prev_target_prim=prev_target_prim
+                            ),
+                        "lift_pt": None,
+                        "approach_goal_b": None,
+                        "grasp_goal_b": None,
+                        "attempt_idx": 0,
+                        "open_left": int(getattr(args, "gripper_open_steps", 10)),
+                        "close_left": int(getattr(args, "gripper_close_steps", 60)),
+                        "stabilize_left": int(getattr(args, "stabilize_steps", 300)),
+                        "hold_after_close_left": int(getattr(args, "hold_after_close_steps", 30)),
+                        "open_queued": False,
+                        "close_queued": False,
+                        "lift_queued": False,
+                        "hold_requeue_count": 0,
+                        "approach_last_dist_m": None,
+                        "approach_stall_steps": 0,
+                        "approach_start_step": None,
+                    }
+                )
+                # Update for next episode
+                try:
+                    prev_target_prim = str(vla_planner_state.get("target_prim", "") or "") or None
+                except Exception:
+                    prev_target_prim = None
+                # Print basic episode header to terminal (helps debug "repeating" confusion).
+                try:
+                    tgt = vla_planner_state.get("target_prim", None)
+                    candidates = sorted([str(p) for p in spawned_paths])
+                    print(
+                        f"[VLA_V1][EP] start ep={ep} target={tgt} "
+                        f"label='{_prim_label(str(tgt or ''))}' n_objects={len(spawned_paths)} "
+                        f"candidates={[c.split('/')[-1] for c in candidates]}"
+                    )
+                except Exception:
+                    print(
+                        f"[VLA_V1][EP] start ep={ep} target={vla_planner_state.get('target_prim')} "
+                        f"label='{_prim_label(str(vla_planner_state.get('target_prim', '')))}'"
+                    )
+                session_logger.log_event(
+                    "episode_start",
+                    {
+                        "episode_idx": int(ep),
+                        "num_objects": int(len(spawned_paths)),
+                        "target_prim": str(vla_planner_state.get("target_prim", None)),
+                        "target_label": _prim_label(str(vla_planner_state.get("target_prim", ""))),
+                    },
+                )
 
-                        if str(vla_planner_state.get("stage", "idle")) == "idle":
-                            if len(spawned_paths) != 0:
-                                # Replan throttle: avoid spamming plan calls if execution is stalled.
-                                should_plan = True
-                                try:
-                                    cooldown = int(getattr(args, "replan_cooldown_steps", 120))
-                                    last_plan = int(vla_planner_state.get("last_plan_step", -10**9))
-                                    if (steps - last_plan) < cooldown:
-                                        should_plan = False
-                                except Exception:
-                                    # If anything goes wrong, don't block planning.
-                                    should_plan = True
+                accum = 0.0
+                steps = 0
+                while simulation_app.is_running() and steps < max_steps_ep:
+                    steps += 1
 
-                                if not should_plan:
-                                    # Hold position and wait for cooldown.
-                                    pass
+                    # Planner-driven reach-to-grasp state machine
+                    try:
+                        wp.set_current_pose_b(get_ee_pos_base_frame(robot, str(getattr(args, "ee_link", "j2n6s300_end_effector"))))
+                    except Exception:
+                        pass
+
+                    try:
+                        stab_left = int(vla_planner_state.get("stabilize_left", 0))
+                        if stab_left > 0:
+                            vla_planner_state["stabilize_left"] = stab_left - 1
+                            # Skip state machine when stabilizing - just hold position
+                        else:
+                            stage = str(vla_planner_state.get("stage", "idle"))
+
+                            if stage == "init_open":
+                                open_left = int(vla_planner_state.get("open_left", 0))
+                                if not vla_planner_state.get("open_queued", False):
+                                    session_logger.log_event("action_start", {"action": "GRIPPER_OPEN", "steps": int(open_left), "episode_idx": int(ep)})
+                                    try:
+                                        controller.set_mode("gripper")
+                                        wp.queue_gripper(+1.0, steps=open_left)
+                                    except Exception:
+                                        pass
+                                    vla_planner_state["open_queued"] = True
+                                controller.set_mode("gripper")
+                                if open_left > 0:
+                                    vla_planner_state["open_left"] = open_left - 1
                                 else:
+                                    session_logger.log_event("action_end", {"action": "GRIPPER_OPEN", "episode_idx": int(ep)})
+                                    vla_planner_state["stage"] = "idle"
+                                    # Ensure mode is set to translate for planning/approach
+                                    controller.set_mode("translate")
 
-                                    target_prim = vla_planner_state.get("target_prim", None)
+                            if str(vla_planner_state.get("stage", "idle")) == "idle":
+                                if len(spawned_paths) != 0:
+                                    # Replan throttle: avoid spamming plan calls if execution is stalled.
+                                    should_plan = True
+                                    try:
+                                        cooldown = int(getattr(args, "replan_cooldown_steps", 120))
+                                        last_plan = int(vla_planner_state.get("last_plan_step", -10**9))
+                                        if (steps - last_plan) < cooldown:
+                                            should_plan = False
+                                    except Exception:
+                                        # If anything goes wrong, don't block planning.
+                                        should_plan = True
+
+                                    if not should_plan:
+                                        # Hold position and wait for cooldown.
+                                        pass
+                                    else:
+                                        target_prim = vla_planner_state.get("target_prim", None)
                                     if not target_prim:
                                         target_prim = _select_episode_target_prim(ep)
                                         vla_planner_state["target_prim"] = target_prim
@@ -1095,7 +1177,7 @@ def run(args: argparse.Namespace) -> int:
                                         target_pos_b=(gx, gy, gz_ee),
                                         target_quat_b_wxyz=None if bool(getattr(args, "ignore_grasp_orientation", True)) else quat_b,
                                         pregrasp_offset_m=float(getattr(args, "pregrasp", 0.10)),
-                                    grasp_depth_m=float(grasp_depth_eff),
+                                        grasp_depth_m=float(grasp_depth_eff),
                                         lift_height_m=float(getattr(args, "lift", 0.15)),
                                     )
                                     vla_planner_state["last_plan_step"] = int(steps)
@@ -1130,341 +1212,399 @@ def run(args: argparse.Namespace) -> int:
                                     session_logger.log_event("action_start", {"action": "EXECUTE_WAYPOINTS", "n_waypoints": int(len(approach_pts)), "episode_idx": int(ep)})
                                     wp.set_waypoints_b([(float(x), float(y), float(z)) for (x, y, z) in approach_pts])
 
-                        if str(vla_planner_state.get("stage", "")) == "approach":
-                            # Absolute time-based escape hatch: always make progress to closing.
-                            try:
-                                start_step = vla_planner_state.get("approach_start_step", None)
-                                if start_step is not None:
-                                    force_after = int(getattr(args, "force_close_after_approach_steps", 900))
-                                    if int(steps) - int(start_step) >= force_after:
-                                        session_logger.log_event(
-                                            "action_start",
-                                            {"action": "FORCE_CLOSE_TIMEOUT", "steps_in_approach": int(steps) - int(start_step), "episode_idx": int(ep)},
-                                        )
-                                        try:
-                                            wp.set_waypoints_b([])
-                                        except Exception:
-                                            pass
-                                        vla_planner_state["stage"] = "close"
-                                        vla_planner_state["close_queued"] = False
-                                        vla_planner_state["close_left"] = int(getattr(args, "gripper_close_steps", 60))
-                            except Exception:
-                                pass
-
-                            # If we're stuck pressing into the object (contact-stall), we may never reach the exact
-                            # grasp waypoint. Detect lack of progress and force a close so we don't "sleep" forever.
-                            try:
-                                goal = vla_planner_state.get("approach_goal_b", None)
-                                ee_pos_b = get_ee_pos_base_frame(robot, str(getattr(args, "ee_link", "j2n6s300_end_effector")))
-                                if goal is not None and ee_pos_b is not None:
-                                    dx = float(ee_pos_b[0]) - float(goal[0])
-                                    dy = float(ee_pos_b[1]) - float(goal[1])
-                                    dz = float(ee_pos_b[2]) - float(goal[2])
-                                    dist_m_now = (dx * dx + dy * dy + dz * dz) ** 0.5
-                                    last = vla_planner_state.get("approach_last_dist_m", None)
-                                    eps = float(getattr(args, "approach_stall_eps_m", 5e-4))
-                                    if last is not None and dist_m_now > (float(last) - eps):
-                                        vla_planner_state["approach_stall_steps"] = int(vla_planner_state.get("approach_stall_steps", 0)) + 1
-                                    else:
-                                        vla_planner_state["approach_stall_steps"] = 0
-                                    vla_planner_state["approach_last_dist_m"] = float(dist_m_now)
-
-                                    stall_steps = int(vla_planner_state.get("approach_stall_steps", 0))
-                                    stall_thresh = int(getattr(args, "approach_stall_steps_to_close", 120))
-                                    close_within_m = float(getattr(args, "close_if_within_m", 0.015))
-                                    if dist_m_now <= close_within_m or stall_steps >= stall_thresh:
-                                        # Force transition to close, regardless of waypoint follower state.
-                                        if stall_steps >= stall_thresh:
+                            if str(vla_planner_state.get("stage", "")) == "approach":
+                                # Absolute time-based escape hatch: always make progress to closing.
+                                try:
+                                    start_step = vla_planner_state.get("approach_start_step", None)
+                                    if start_step is not None:
+                                        force_after = int(getattr(args, "force_close_after_approach_steps", 900))
+                                        if int(steps) - int(start_step) >= force_after:
                                             session_logger.log_event(
                                                 "action_start",
-                                                {
-                                                    "action": "FORCE_CLOSE_STALL",
-                                                    "dist_m": float(dist_m_now),
-                                                    "stall_steps": int(stall_steps),
-                                                    "stall_thresh": int(stall_thresh),
-                                                    "episode_idx": int(ep),
-                                                },
+                                                {"action": "FORCE_CLOSE_TIMEOUT", "steps_in_approach": int(steps) - int(start_step), "episode_idx": int(ep)},
                                             )
-                                        try:
-                                            wp.set_waypoints_b([])
-                                        except Exception:
-                                            pass
-                                        vla_planner_state["stage"] = "close"
-                                        vla_planner_state["close_queued"] = False
-                                        vla_planner_state["close_left"] = int(getattr(args, "gripper_close_steps", 60))
-                            except Exception:
-                                pass
-
-                            if len(getattr(wp, "_waypoints_b", [])) == 0:
-                                session_logger.log_event("action_end", {"action": "EXECUTE_WAYPOINTS", "episode_idx": int(ep)})
-                                # Only close if we are actually near the final approach goal; otherwise replan.
-                                ee_pos_b = None
-                                try:
-                                    ee_pos_b = get_ee_pos_base_frame(robot, str(getattr(args, "ee_link", "j2n6s300_end_effector")))
+                                            try:
+                                                wp.set_waypoints_b([])
+                                            except Exception:
+                                                pass
+                                            vla_planner_state["stage"] = "close"
+                                            vla_planner_state["close_queued"] = False
+                                            vla_planner_state["close_left"] = int(getattr(args, "gripper_close_steps", 60))
                                 except Exception:
-                                    ee_pos_b = None
-                                goal = vla_planner_state.get("approach_goal_b", None)
-                                replan_far_m = float(getattr(args, "replan_if_far_m", 0.03))
-                                close_within_m = float(getattr(args, "close_if_within_m", 0.015))
-                                dist_m = None
+                                    pass
+
+                                # If we're stuck pressing into the object (contact-stall), we may never reach the exact
+                                # grasp waypoint. Detect lack of progress and force a close so we don't "sleep" forever.
                                 try:
-                                    if ee_pos_b is not None and goal is not None:
+                                    goal = vla_planner_state.get("approach_goal_b", None)
+                                    ee_pos_b = get_ee_pos_base_frame(robot, str(getattr(args, "ee_link", "j2n6s300_end_effector")))
+                                    if goal is not None and ee_pos_b is not None:
                                         dx = float(ee_pos_b[0]) - float(goal[0])
                                         dy = float(ee_pos_b[1]) - float(goal[1])
                                         dz = float(ee_pos_b[2]) - float(goal[2])
-                                        dist_m = (dx * dx + dy * dy + dz * dz) ** 0.5
-                                except Exception:
-                                    dist_m = None
-                                if dist_m is not None and dist_m > replan_far_m:
-                                    session_logger.log_event(
-                                        "action_start",
-                                        {"action": "REPLAN_TOO_FAR", "dist_m": float(dist_m), "thresh_m": float(replan_far_m), "episode_idx": int(ep)},
-                                    )
-                                    # Previously we replanned here, which causes oscillation/dancing when the EE can't
-                                    # satisfy the exact waypoint. Instead, keep trying to converge to the goal.
-                                    try:
-                                        if goal is not None:
-                                            wp.set_waypoints_b([(float(goal[0]), float(goal[1]), float(goal[2]))])
-                                    except Exception:
-                                        pass
-                                    vla_planner_state["stage"] = "approach"
-                                elif dist_m is not None and dist_m > close_within_m:
-                                    session_logger.log_event(
-                                        "action_start",
-                                        {"action": "HOLD_TOO_FAR_TO_CLOSE", "dist_m": float(dist_m), "thresh_m": float(close_within_m), "episode_idx": int(ep)},
-                                    )
-                                    # We are close, but not close enough to safely close yet.
-                                    # IMPORTANT: if we simply stay in "approach" with an empty waypoint list, the arm
-                                    # will just hold position forever (looks like it's "sleeping" on top of the object).
-                                    # Re-queue the final approach goal so execution keeps trying to converge.
-                                    try:
-                                        if goal is not None:
-                                            gx, gy, gz = float(goal[0]), float(goal[1]), float(goal[2])
-                                            wp.set_waypoints_b([(gx, gy, gz)])
-                                            vla_planner_state["hold_requeue_count"] = int(vla_planner_state.get("hold_requeue_count", 0)) + 1
-                                    except Exception:
-                                        pass
-                                    vla_planner_state["stage"] = "approach"
-                                else:
-                                    vla_planner_state["stage"] = "close"
-                                    vla_planner_state["close_queued"] = False
-                                    vla_planner_state["close_left"] = int(getattr(args, "gripper_close_steps", 60))
+                                        dist_m_now = (dx * dx + dy * dy + dz * dz) ** 0.5
+                                        last = vla_planner_state.get("approach_last_dist_m", None)
+                                        eps = float(getattr(args, "approach_stall_eps_m", 5e-4))
+                                        if last is not None and dist_m_now > (float(last) - eps):
+                                            vla_planner_state["approach_stall_steps"] = int(vla_planner_state.get("approach_stall_steps", 0)) + 1
+                                        else:
+                                            vla_planner_state["approach_stall_steps"] = 0
+                                        vla_planner_state["approach_last_dist_m"] = float(dist_m_now)
 
-                        if str(vla_planner_state.get("stage", "")) == "close":
-                            close_left = int(vla_planner_state.get("close_left", 0))
-                            if not vla_planner_state.get("close_queued", False):
-                                session_logger.log_event("action_start", {"action": "GRIPPER_CLOSE", "steps": int(close_left), "episode_idx": int(ep)})
-                                try:
-                                    controller.set_mode("gripper")
-                                    wp.queue_gripper(-1.0, steps=close_left)
+                                        stall_steps = int(vla_planner_state.get("approach_stall_steps", 0))
+                                        stall_thresh = int(getattr(args, "approach_stall_steps_to_close", 120))
+                                        close_within_m = float(getattr(args, "close_if_within_m", 0.015))
+                                        if dist_m_now <= close_within_m or stall_steps >= stall_thresh:
+                                            # Force transition to close, regardless of waypoint follower state.
+                                            if stall_steps >= stall_thresh:
+                                                session_logger.log_event(
+                                                    "action_start",
+                                                    {
+                                                        "action": "FORCE_CLOSE_STALL",
+                                                        "dist_m": float(dist_m_now),
+                                                        "stall_steps": int(stall_steps),
+                                                        "stall_thresh": int(stall_thresh),
+                                                        "episode_idx": int(ep),
+                                                    },
+                                                )
+                                            try:
+                                                wp.set_waypoints_b([])
+                                            except Exception:
+                                                pass
+                                            vla_planner_state["stage"] = "close"
+                                            vla_planner_state["close_queued"] = False
+                                            vla_planner_state["close_left"] = int(getattr(args, "gripper_close_steps", 60))
                                 except Exception:
                                     pass
-                                vla_planner_state["close_queued"] = True
-                            controller.set_mode("gripper")
-                            if close_left > 0:
-                                vla_planner_state["close_left"] = close_left - 1
-                            else:
-                                session_logger.log_event("action_end", {"action": "GRIPPER_CLOSE", "episode_idx": int(ep)})
-                                # Empty-close heuristic: if fingers reached (almost) fully closed, likely no object was grasped.
-                                empty = False
-                                mean_pos = None
-                                try:
-                                    if _gripper_joint_ids:
-                                        qg = robot.data.joint_pos[0, _gripper_joint_ids].detach().to("cpu")
-                                        mean_pos = float(qg.mean().item())
-                                        close_pos = float(_gripper_close_pos)
-                                        empty = mean_pos >= (close_pos - float(getattr(args, "empty_close_threshold", 0.06)))
-                                except Exception:
-                                    empty = False
-                                if empty:
-                                    session_logger.log_event(
-                                        "grasp_result",
-                                        {"episode_idx": int(ep), "ok": False, "reason": "empty_close", "gripper_mean_pos": mean_pos},
-                                    )
-                                    attempt = int(vla_planner_state.get("attempt_idx", 0)) + 1
-                                    vla_planner_state["attempt_idx"] = attempt
-                                    if attempt < int(getattr(args, "max_grasp_attempts", 3)):
-                                        wp.set_waypoints_b([])
-                                        vla_planner_state["stage"] = "init_open"
-                                        vla_planner_state["open_left"] = int(getattr(args, "gripper_open_steps", 10))
-                                        vla_planner_state["open_queued"] = False
-                                        vla_planner_state["close_queued"] = False
-                                        vla_planner_state["lift_queued"] = False
-                                        vla_planner_state["stabilize_left"] = int(getattr(args, "stabilize_steps", 300))
-                                        # Skip lift; go retry immediately.
-                                        continue
-                                vla_planner_state["stage"] = "post_close_hold"
-                                vla_planner_state["hold_after_close_left"] = int(getattr(args, "hold_after_close_steps", 30))
-                                vla_planner_state["lift_queued"] = False
 
-                        if str(vla_planner_state.get("stage", "")) == "post_close_hold":
-                            hold_left = int(vla_planner_state.get("hold_after_close_left", 0))
-                            controller.set_mode("translate")
-                            if hold_left > 0:
-                                vla_planner_state["hold_after_close_left"] = hold_left - 1
-                            else:
-                                vla_planner_state["stage"] = "lift"
-
-                        if str(vla_planner_state.get("stage", "")) == "lift":
-                            lift_pt = vla_planner_state.get("lift_pt", None)
-                            if lift_pt is not None and not vla_planner_state.get("lift_queued", False):
-                                controller.set_mode("translate")
-                                session_logger.log_event(
-                                    "action_start",
-                                    {"action": "LIFT", "target": [float(lift_pt[0]), float(lift_pt[1]), float(lift_pt[2])], "episode_idx": int(ep)},
-                                )
-                                wp.set_waypoints_b([(float(lift_pt[0]), float(lift_pt[1]), float(lift_pt[2]))])
-                                vla_planner_state["lift_queued"] = True
-                            if lift_pt is not None and vla_planner_state.get("lift_queued", False) and len(getattr(wp, "_waypoints_b", [])) == 0:
-                                session_logger.log_event("action_end", {"action": "LIFT", "episode_idx": int(ep)})
-                                # Check success (target object lifted above table plane)
-                                target_prim = str(vla_planner_state.get("target_prim", ""))
-                                z = _target_z_from_tracker(target_prim) if target_prim else None
-                                dz = None
-                                ok = False
-                                try:
-                                    if z is not None:
-                                        dz = float(z) - float(_table_z())
-                                        ok = dz >= float(getattr(args, "lift_success_min_dz_m", 0.06))
-                                except Exception:
-                                    ok = False
-                                session_logger.log_event(
-                                    "grasp_result",
-                                    {"episode_idx": int(ep), "ok": bool(ok), "target_z": z, "dz_above_table": dz},
-                                )
-                                if ok:
-                                    vla_planner_state["stage"] = "done"
-                                else:
-                                    # Retry: reopen and replan (within the same episode)
-                                    attempt = int(vla_planner_state.get("attempt_idx", 0)) + 1
-                                    vla_planner_state["attempt_idx"] = attempt
-                                    if attempt < int(getattr(args, "max_grasp_attempts", 3)):
+                                if len(getattr(wp, "_waypoints_b", [])) == 0:
+                                    session_logger.log_event("action_end", {"action": "EXECUTE_WAYPOINTS", "episode_idx": int(ep)})
+                                    # Only close if we are actually near the final approach goal; otherwise replan.
+                                    ee_pos_b = None
+                                    try:
+                                        ee_pos_b = get_ee_pos_base_frame(robot, str(getattr(args, "ee_link", "j2n6s300_end_effector")))
+                                    except Exception:
+                                        ee_pos_b = None
+                                    goal = vla_planner_state.get("approach_goal_b", None)
+                                    replan_far_m = float(getattr(args, "replan_if_far_m", 0.03))
+                                    close_within_m = float(getattr(args, "close_if_within_m", 0.015))
+                                    dist_m = None
+                                    try:
+                                        if ee_pos_b is not None and goal is not None:
+                                            dx = float(ee_pos_b[0]) - float(goal[0])
+                                            dy = float(ee_pos_b[1]) - float(goal[1])
+                                            dz = float(ee_pos_b[2]) - float(goal[2])
+                                            dist_m = (dx * dx + dy * dy + dz * dz) ** 0.5
+                                    except Exception:
+                                        dist_m = None
+                                    if dist_m is not None and dist_m > replan_far_m:
                                         session_logger.log_event(
                                             "action_start",
-                                            {"action": "RETRY_GRASP", "attempt_idx": int(attempt), "episode_idx": int(ep)},
+                                            {"action": "REPLAN_TOO_FAR", "dist_m": float(dist_m), "thresh_m": float(replan_far_m), "episode_idx": int(ep)},
                                         )
-                                        wp.set_waypoints_b([])
-                                        vla_planner_state["stage"] = "init_open"
-                                        vla_planner_state["open_left"] = int(getattr(args, "gripper_open_steps", 10))
-                                        vla_planner_state["open_queued"] = False
-                                        vla_planner_state["close_queued"] = False
-                                        vla_planner_state["lift_queued"] = False
-                                        # small settle before replan
-                                        vla_planner_state["stabilize_left"] = int(getattr(args, "stabilize_steps", 300))
+                                        # Previously we replanned here, which causes oscillation/dancing when the EE can't
+                                        # satisfy the exact waypoint. Instead, keep trying to converge to the goal.
+                                        try:
+                                            if goal is not None:
+                                                wp.set_waypoints_b([(float(goal[0]), float(goal[1]), float(goal[2]))])
+                                        except Exception:
+                                            pass
+                                        vla_planner_state["stage"] = "approach"
+                                    elif dist_m is not None and dist_m > close_within_m:
+                                        session_logger.log_event(
+                                            "action_start",
+                                            {"action": "HOLD_TOO_FAR_TO_CLOSE", "dist_m": float(dist_m), "thresh_m": float(close_within_m), "episode_idx": int(ep)},
+                                        )
+                                        # We are close, but not close enough to safely close yet.
+                                        # IMPORTANT: if we simply stay in "approach" with an empty waypoint list, the arm
+                                        # will just hold position forever (looks like it's "sleeping" on top of the object).
+                                        # Re-queue the final approach goal so execution keeps trying to converge.
+                                        try:
+                                            if goal is not None:
+                                                gx, gy, gz = float(goal[0]), float(goal[1]), float(goal[2])
+                                                wp.set_waypoints_b([(gx, gy, gz)])
+                                                vla_planner_state["hold_requeue_count"] = int(vla_planner_state.get("hold_requeue_count", 0)) + 1
+                                        except Exception:
+                                            pass
+                                        vla_planner_state["stage"] = "approach"
                                     else:
+                                        vla_planner_state["stage"] = "close"
+                                        vla_planner_state["close_queued"] = False
+                                        vla_planner_state["close_left"] = int(getattr(args, "gripper_close_steps", 60))
+
+                            if str(vla_planner_state.get("stage", "")) == "close":
+                                close_left = int(vla_planner_state.get("close_left", 0))
+                                controller.set_mode("gripper")
+
+                                if not vla_planner_state.get("close_queued", False):
+                                    session_logger.log_event(
+                                        "action_start",
+                                        {"action": "GRIPPER_CLOSE", "steps": int(close_left), "episode_idx": int(ep)},
+                                    )
+                                    try:
+                                        wp.queue_gripper(-1.0, steps=close_left)
+                                    except Exception:
+                                        pass
+                                    vla_planner_state["close_queued"] = True
+
+                                if close_left > 0:
+                                    vla_planner_state["close_left"] = close_left - 1
+                                else:
+                                    session_logger.log_event("action_end", {"action": "GRIPPER_CLOSE", "episode_idx": int(ep)})
+                                    # Empty-close heuristic: if fingers reached (almost) fully closed, likely no object was grasped.
+                                    empty = False
+                                    mean_pos = None
+                                    try:
+                                        if _gripper_joint_ids:
+                                            qg = robot.data.joint_pos[0, _gripper_joint_ids].detach().to("cpu")
+                                            mean_pos = float(qg.mean().item())
+                                            close_pos = float(_gripper_close_pos)
+                                            empty = mean_pos >= (close_pos - float(getattr(args, "empty_close_threshold", 0.06)))
+                                    except Exception:
+                                        empty = False
+
+                                    if empty:
+                                        session_logger.log_event(
+                                            "grasp_result",
+                                            {"episode_idx": int(ep), "ok": False, "reason": "empty_close", "gripper_mean_pos": mean_pos},
+                                        )
+                                        attempt = int(vla_planner_state.get("attempt_idx", 0)) + 1
+                                        vla_planner_state["attempt_idx"] = attempt
+                                        if attempt < int(getattr(args, "max_grasp_attempts", 3)):
+                                            wp.set_waypoints_b([])
+                                            vla_planner_state["stage"] = "init_open"
+                                            vla_planner_state["open_left"] = int(getattr(args, "gripper_open_steps", 10))
+                                            vla_planner_state["open_queued"] = False
+                                            vla_planner_state["close_queued"] = False
+                                            vla_planner_state["lift_queued"] = False
+                                            vla_planner_state["stabilize_left"] = int(getattr(args, "stabilize_steps", 300))
+                                            # Reset controller mode for retry
+                                            controller.set_mode("gripper")
+                                            # Skip lift; go retry immediately.
+                                            continue
+
+                                    vla_planner_state["stage"] = "post_close_hold"
+                                    vla_planner_state["hold_after_close_left"] = int(getattr(args, "hold_after_close_steps", 30))
+                                    vla_planner_state["lift_queued"] = False
+
+                            if str(vla_planner_state.get("stage", "")) == "post_close_hold":
+                                hold_left = int(vla_planner_state.get("hold_after_close_left", 0))
+                                controller.set_mode("translate")
+                                if hold_left > 0:
+                                    vla_planner_state["hold_after_close_left"] = hold_left - 1
+                                else:
+                                    vla_planner_state["stage"] = "lift"
+
+                            if str(vla_planner_state.get("stage", "")) == "lift":
+                                lift_pt = vla_planner_state.get("lift_pt", None)
+                                controller.set_mode("translate")
+
+                                if lift_pt is not None and not vla_planner_state.get("lift_queued", False):
+                                    session_logger.log_event(
+                                        "action_start",
+                                        {"action": "LIFT", "target": [float(lift_pt[0]), float(lift_pt[1]), float(lift_pt[2])], "episode_idx": int(ep)},
+                                    )
+                                    wp.set_waypoints_b([(float(lift_pt[0]), float(lift_pt[1]), float(lift_pt[2]))])
+                                    vla_planner_state["lift_queued"] = True
+
+                                if (
+                                    lift_pt is not None
+                                    and vla_planner_state.get("lift_queued", False)
+                                    and len(getattr(wp, "_waypoints_b", [])) == 0
+                                ):
+                                    session_logger.log_event("action_end", {"action": "LIFT", "episode_idx": int(ep)})
+                                    # Check success (target object lifted above table plane)
+                                    target_prim = str(vla_planner_state.get("target_prim", ""))
+                                    z = _target_z_from_tracker(target_prim) if target_prim else None
+                                    dz = None
+                                    ok = False
+                                    try:
+                                        if z is not None:
+                                            dz = float(z) - float(_table_z())
+                                            ok = dz >= float(getattr(args, "lift_success_min_dz_m", 0.06))
+                                    except Exception:
+                                        ok = False
+                                    session_logger.log_event(
+                                        "grasp_result",
+                                        {"episode_idx": int(ep), "ok": bool(ok), "target_z": z, "dz_above_table": dz},
+                                    )
+                                    if ok:
                                         vla_planner_state["stage"] = "done"
+                                    else:
+                                        # Retry: reopen and replan (within the same episode)
+                                        attempt = int(vla_planner_state.get("attempt_idx", 0)) + 1
+                                        vla_planner_state["attempt_idx"] = attempt
+                                        if attempt < int(getattr(args, "max_grasp_attempts", 3)):
+                                            session_logger.log_event(
+                                                "action_start",
+                                                {"action": "RETRY_GRASP", "attempt_idx": int(attempt), "episode_idx": int(ep)},
+                                            )
+                                            wp.set_waypoints_b([])
+                                            vla_planner_state["stage"] = "init_open"
+                                            vla_planner_state["open_left"] = int(getattr(args, "gripper_open_steps", 10))
+                                            vla_planner_state["open_queued"] = False
+                                            vla_planner_state["close_queued"] = False
+                                            vla_planner_state["lift_queued"] = False
+                                            # small settle before replan
+                                            vla_planner_state["stabilize_left"] = int(getattr(args, "stabilize_steps", 300))
+                                            # Reset controller mode for retry
+                                            controller.set_mode("gripper")
+                                        else:
+                                            vla_planner_state["stage"] = "done"
 
-                        if str(vla_planner_state.get("stage", "")) == "done":
-                            session_logger.log_event("episode_end", {"episode_idx": int(ep), "steps": int(steps)})
-                            print(f"[VLA_V1][EP] end ep={ep} steps={steps} attempts={int(vla_planner_state.get('attempt_idx', 0))}")
-                            break
-                except Exception as e:
-                    if session_logger.tick_idx < 3:
-                        print(f"[VLA_V1][PLANNER][WARN] Planner control error: {e}")
+                            if str(vla_planner_state.get("stage", "")) == "done":
+                                session_logger.log_event("episode_end", {"episode_idx": int(ep), "steps": int(steps)})
+                                print(f"[VLA_V1][EP] end ep={ep} steps={steps} attempts={int(vla_planner_state.get('attempt_idx', 0))} ticks={session_logger.tick_idx} images={images_captured_episode}")
+                                # Track totals before closing
+                                total_ticks += session_logger.tick_idx
+                                total_images += images_captured_episode
+                                # Close logger for this episode
+                                try:
+                                    session_logger.close()
+                                except Exception:
+                                    pass
+                                break
+                    except Exception as e:
+                        # Log error but continue the episode
+                        import traceback
+                        if session_logger.tick_idx < 10 or steps % 100 == 0:
+                            print(f"[VLA_V1][PLANNER][WARN] Planner control error at ep={ep} step={steps} tick={session_logger.tick_idx}: {e}")
+                            if session_logger.tick_idx < 3:
+                                traceback.print_exc()
 
-                controller.step(robot, dt)
+                    controller.step(robot, dt)
 
-                do_tick = (accum + dt + 1e-9) >= period
-                do_render = bool(do_tick) or (steps % render_stride == 0)
-                sim.step(render=bool(do_render))
-                robot.update(dt)
+                    do_tick = (accum + dt + 1e-9) >= period
+                    do_render = bool(do_tick) or (steps % render_stride == 0)
+                    sim.step(render=bool(do_render))
+                    robot.update(dt)
 
-                if camera_sensor is not None:
-                    try:
-                        if hasattr(camera_sensor, "update"):
-                            if bool(do_render):
-                                camera_sensor.update(dt)
-                    except Exception:
-                        pass
-
-                accum += dt
-                if accum + 1e-9 >= period:
-                    accum = 0.0
-
-                if do_tick:
-                    objs_raw = []
-                    try:
-                        for o in tracker.snapshot():
-                            lbl = id_to_label.get(o.id, o.label)
-                            objs_raw.append(
-                                {
-                                    "id": o.id,
-                                    "label": lbl,
-                                    "pose": {
-                                        "position_m": list(o.pose.position_m),
-                                        "orientation_wxyz": list(o.pose.orientation_wxyz),
-                                    },
-                                    "confidence": o.confidence,
-                                }
-                            )
-                    except Exception:
-                        pass
-
-                    image_path = None
                     if camera_sensor is not None:
                         try:
-                            cam_data = camera_sensor.data
-                            rgb_data = None
-                            if cam_data.output is not None:
-                                rgb_data = cam_data.output.get("rgb")
-                            if rgb_data is not None:
-                                if len(rgb_data.shape) == 4:
-                                    rgb_np = rgb_data[0].cpu().numpy()
-                                elif len(rgb_data.shape) == 3:
-                                    rgb_np = rgb_data.cpu().numpy()
-                                else:
-                                    raise ValueError(f"Unexpected RGB data shape: {rgb_data.shape}")
-
-                                if rgb_np.max() <= 1.0:
-                                    rgb_np = (rgb_np * 255).astype(np.uint8)
-                                else:
-                                    rgb_np = rgb_np.astype(np.uint8)
-
-                                image_filename = f"image_{session_logger.tick_idx:06d}.{image_format}"
-                                out_path = images_dir / image_filename
-                                try:
-                                    from PIL import Image
-
-                                    Image.fromarray(rgb_np).save(str(out_path))
-                                except Exception:
-                                    try:
-                                        import cv2
-
-                                        if len(rgb_np.shape) == 3 and rgb_np.shape[2] == 3:
-                                            rgb_np_bgr = cv2.cvtColor(rgb_np, cv2.COLOR_RGB2BGR)
-                                            cv2.imwrite(str(out_path), rgb_np_bgr)
-                                        else:
-                                            cv2.imwrite(str(out_path), rgb_np)
-                                    except Exception:
-                                        np.save(str(out_path).replace(f".{image_format}", ".npy"), rgb_np)
-                                        out_path = out_path.with_suffix(".npy")
-
-                                image_path = f"images/{image_filename}"
-                                images_captured += 1
+                            if hasattr(camera_sensor, "update"):
+                                if bool(do_render):
+                                    camera_sensor.update(dt)
                         except Exception:
-                            image_path = None
+                            pass
 
-                    session_logger.write_tick(
-                        robot=robot,
-                        controller=controller,
-                        objects=objs_raw,
-                        last_user_cmd=mux_input.last_cmd,
-                        cfg=tick_cfg,
-                        image_path=image_path,
-                    )
-            # If we hit the max steps, still end the episode cleanly.
-            if str(vla_planner_state.get("stage", "")) != "done":
-                session_logger.log_event("episode_end", {"episode_idx": int(ep), "steps": int(steps), "truncated": True})
+                    accum += dt
+                    if accum + 1e-9 >= period:
+                        accum = 0.0
+
+                    if do_tick:
+                        objs_raw = []
+                        try:
+                            for o in tracker.snapshot():
+                                lbl = id_to_label.get(o.id, o.label)
+                                objs_raw.append(
+                                    {
+                                        "id": o.id,
+                                        "label": lbl,
+                                        "pose": {
+                                            "position_m": list(o.pose.position_m),
+                                            "orientation_wxyz": list(o.pose.orientation_wxyz),
+                                        },
+                                        "confidence": o.confidence,
+                                    }
+                                )
+                        except Exception:
+                            pass
+
+                        image_path = None
+                        if camera_sensor is not None:
+                            try:
+                                cam_data = camera_sensor.data
+                                rgb_data = None
+                                if cam_data.output is not None:
+                                    rgb_data = cam_data.output.get("rgb")
+                                if rgb_data is not None:
+                                    if len(rgb_data.shape) == 4:
+                                        rgb_np = rgb_data[0].cpu().numpy()
+                                    elif len(rgb_data.shape) == 3:
+                                        rgb_np = rgb_data.cpu().numpy()
+                                    else:
+                                        raise ValueError(f"Unexpected RGB data shape: {rgb_data.shape}")
+
+                                    if rgb_np.max() <= 1.0:
+                                        rgb_np = (rgb_np * 255).astype(np.uint8)
+                                    else:
+                                        rgb_np = rgb_np.astype(np.uint8)
+
+                                    image_filename = f"image_{session_logger.tick_idx:06d}.{image_format}"
+                                    out_path = images_dir / image_filename
+                                    try:
+                                        from PIL import Image
+
+                                        Image.fromarray(rgb_np).save(str(out_path))
+                                    except Exception:
+                                        try:
+                                            import cv2
+
+                                            if len(rgb_np.shape) == 3 and rgb_np.shape[2] == 3:
+                                                rgb_np_bgr = cv2.cvtColor(rgb_np, cv2.COLOR_RGB2BGR)
+                                                cv2.imwrite(str(out_path), rgb_np_bgr)
+                                            else:
+                                                cv2.imwrite(str(out_path), rgb_np)
+                                        except Exception:
+                                            np.save(str(out_path).replace(f".{image_format}", ".npy"), rgb_np)
+                                            out_path = out_path.with_suffix(".npy")
+
+                                    image_path = f"images/{image_filename}"
+                                    images_captured_episode += 1
+                            except Exception:
+                                image_path = None
+
+                        session_logger.write_tick(
+                            robot=robot,
+                            controller=controller,
+                            objects=objs_raw,
+                            last_user_cmd=mux_input.last_cmd,
+                            cfg=tick_cfg,
+                            image_path=image_path,
+                        )
+                # If we hit the max steps, still end the episode cleanly.
+                if str(vla_planner_state.get("stage", "")) != "done":
+                    session_logger.log_event("episode_end", {"episode_idx": int(ep), "steps": int(steps), "truncated": True})
+                    print(f"[VLA_V1][EP] end ep={ep} (truncated) steps={steps} ticks={session_logger.tick_idx} images={images_captured_episode}")
+                    # Track totals before closing
+                    total_ticks += session_logger.tick_idx
+                    total_images += images_captured_episode
+                    # Close logger for this episode
+                    try:
+                        session_logger.close()
+                    except Exception:
+                        pass
+            except Exception as ep_error:
+                # Catch any episode-level errors and continue to next episode
+                import traceback
+                print(f"[VLA_V1][EP][ERROR] Episode {ep} failed with error: {ep_error}")
+                traceback.print_exc()
+                # Try to close logger if it was created
+                try:
+                    if 'session_logger' in locals():
+                        session_logger.close()
+                except Exception:
+                    pass
+                # Continue to next episode
+                continue
 
     print(f"\n[VLA_V1] Data collection completed!")
-    print(f"[VLA_V1] Total ticks logged: {session_logger.tick_idx}")
-    print(f"[VLA_V1] Total images captured: {images_captured}")
+    if control_mode == "planner":
+        print(f"[VLA_V1] Session directory: {session_folder}")
+        print(f"[VLA_V1] Total episodes: {num_episodes}")
+        print(f"[VLA_V1] Total ticks logged: {total_ticks}")
+        print(f"[VLA_V1] Total images captured: {total_images}")
+    else:
+        print(f"[VLA_V1] Total ticks logged: {session_logger.tick_idx}")
+        print(f"[VLA_V1] Total images captured: {images_captured}")
 
     simulation_app.close()
-    try:
-        session_logger.close()
-    except Exception:
-        pass
+    # Only close logger if not in planner mode (planner mode closes per episode)
+    if control_mode != "planner":
+        try:
+            session_logger.close()
+        except Exception:
+            pass
     return 0
 
 

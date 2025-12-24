@@ -143,7 +143,7 @@ python -m data_collection.collect_data \
   --curobo-world-from-scene \
   --num-episodes 10 \
   --workspace-min-z -0.02 \
-  --spawn-mode usd
+  --spawn-mode box
 ```
 
 ### Customization Guide

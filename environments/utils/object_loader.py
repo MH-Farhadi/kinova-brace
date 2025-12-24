@@ -642,6 +642,12 @@ class ObjectLoader:
                 from isaaclab.sim.spawners.materials.physics_materials_cfg import RigidBodyMaterialCfg
             except Exception:
                 pass
+            if CuboidCfg is None:
+                print(
+                    "[ObjectLoader][ERROR] spawn_mode='box' but required IsaacLab shape spawners could not be imported. "
+                    "This would cause silent spawn failures. Check your IsaacLab installation/environment."
+                )
+                return []
 
         for idx, (item, pos) in enumerate(zip(selection, positions), start=1):
             prim_path = f"{objects_root}/Obj_{idx:02d}"
@@ -728,7 +734,37 @@ class ObjectLoader:
                 spawned_prim_paths.append(prim_path)
                 self._last_spawn_label_map[prim_path] = label
                 
+            except Exception as e:
+                # Do NOT fail silently; partial spawns lead to confusing downstream behavior
+                # (e.g., target selection always picking Obj_01 because only 1 object actually spawned).
+                if not hasattr(self, "_spawn_failures"):
+                    setattr(self, "_spawn_failures", [])
+                try:
+                    getattr(self, "_spawn_failures").append((prim_path, str(e)))  # type: ignore[attr-defined]
+                except Exception:
+                    pass
+                continue  # Skip failed spawns, but report after loop
+
+        # Report spawn failures (if any) and count mismatch
+        try:
+            failures = list(getattr(self, "_spawn_failures", []))  # type: ignore[attr-defined]
+        except Exception:
+            failures = []
+        if failures:
+            # show only first few to avoid flooding logs
+            print(f"[ObjectLoader][WARN] {len(failures)} object spawns failed. First failures:")
+            for prim_path, msg in failures[:5]:
+                print(f"  - {prim_path}: {msg}")
+            # reset for next call
+            try:
+                setattr(self, "_spawn_failures", [])
             except Exception:
-                continue  # Skip failed spawns silently
+                pass
+
+        if len(spawned_prim_paths) < int(num_objects):
+            print(
+                f"[ObjectLoader][WARN] Requested {int(num_objects)} objects but spawned {len(spawned_prim_paths)}. "
+                "This will reduce task diversity."
+            )
 
         return spawned_prim_paths
