@@ -20,7 +20,9 @@ def add_cli_args(parser: argparse.ArgumentParser) -> None:
     # Workspace safety bounds (base frame). If Z min is too high, the arm can never descend to the grasp depth
     # and will "hover" forever above the object.
     parser.add_argument("--workspace-min-z", type=float, default=0.0, help="Minimum EE z in base frame (m).")
-    parser.add_argument("--workspace-max-z", type=float, default=0.35, help="Maximum EE z in base frame (m).")
+    # Default was previously 0.35m, which is below the tabletop in this scene (~0.8-0.9m),
+    # causing the controller to clamp Z and the arm to jitter/oscillate near the clamp.
+    parser.add_argument("--workspace-max-z", type=float, default=1.20, help="Maximum EE z in base frame (m).")
     # Waypoint follower tuning (planner execution)
     parser.add_argument(
         "--wp-max-steps-per-waypoint",
@@ -130,20 +132,32 @@ def add_cli_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--approach-stall-steps-to-close",
         type=int,
-        default=120,
-        help="If EE is unable to reduce distance to grasp goal for this many steps (contact stall), force close.",
+        default=900,
+        help=(
+            "If EE is unable to reduce distance to the final approach goal for this many steps, treat the approach as stalled "
+            "(will retry/end attempt depending on --max-grasp-attempts)."
+        ),
     )
     parser.add_argument(
         "--approach-stall-eps-m",
         type=float,
-        default=5e-4,
-        help="Distance improvement threshold (m) for stall detection in approach stage.",
+        default=2e-4,
+        help="Distance improvement threshold (m) for stall detection in approach stage (smaller = less aggressive).",
+    )
+    parser.add_argument(
+        "--approach-stall-grace-steps",
+        type=int,
+        default=300,
+        help="Grace period (physics steps) at the start of approach before stall detection can trigger.",
     )
     parser.add_argument(
         "--force-close-after-approach-steps",
         type=int,
-        default=900,
-        help="Force gripper close after this many approach steps (prevents infinite hover).",
+        default=2400,
+        help=(
+            "Max approach duration in physics steps. If we still can't get close enough by then, count as a failed attempt "
+            "(prevents infinite hover)."
+        ),
     )
     parser.add_argument(
         "--max-grasp-attempts",
@@ -199,10 +213,30 @@ def add_cli_args(parser: argparse.ArgumentParser) -> None:
     )
 
     # NEW in v1: dynamic cuRobo world sync (USD -> cuRobo cuboids)
+    # Enable cuRobo world sync by default for stable motion (avoids planning straight through objects/table).
     parser.add_argument(
         "--curobo-world-from-scene",
         action="store_true",
-        help="Update cuRobo world collision model from current USD scene prim bounds before planning.",
+        default=True,
+        help="Update cuRobo world collision model from current USD scene prim bounds before planning (default: enabled).",
+    )
+    parser.add_argument(
+        "--no-curobo-world-from-scene",
+        action="store_true",
+        help="Disable cuRobo world collision model sync (faster, but can cause collisions/jitter).",
+    )
+    # optional planner speed override (keeps keyboard teleop fast but planner execution smooth)
+    parser.add_argument(
+        "--planner-speed-mps",
+        type=float,
+        default=0.325,
+        help="Planner execution linear speed (m/s). Used only for --control planner.",
+    )
+    parser.add_argument(
+        "--planner-waypoint-max-seg-m",
+        type=float,
+        default=0.02,
+        help="Max segment length (m) after waypoint densification for smoother execution.",
     )
     parser.add_argument(
         "--curobo-world-include-table",
@@ -415,7 +449,9 @@ def run(args: argparse.Namespace) -> int:
                     if z is None or float(z) >= z_min_ok:
                         filtered.append(p)
                 if filtered:
-                    candidates = filtered
+                    # Only apply filtering if we still have multiple candidates; otherwise we can get
+                    # "stuck" selecting the same remaining object forever.
+                    candidates = filtered if len(filtered) >= 2 else list(candidates_all)
             except Exception:
                 candidates = list(candidates_all)
 
@@ -501,9 +537,27 @@ def run(args: argparse.Namespace) -> int:
             import random
             import math
             import torch
+            import importlib
             from isaacsim.core.simulation_manager import SimulationManager
         except Exception:
             return
+
+        # Best-effort: locate the *actual* rigid body prim under each object root.
+        # Some spawners create a container prim (e.g. Xform) at /Objects/Obj_XX and put the
+        # RigidBodyAPI on a child prim. If we try to create a rigid-body view on the container,
+        # the view can be empty and the "teleport" becomes a no-op (leading to identical poses
+        # across episodes + target selection getting stuck).
+        UsdPhysics = None
+        omni_usd = None
+        sim_utils = None
+        try:
+            UsdPhysics = importlib.import_module("pxr.UsdPhysics")
+            omni_usd = importlib.import_module("omni.usd")
+            sim_utils = importlib.import_module("isaaclab.sim")
+        except Exception:
+            UsdPhysics = None
+            omni_usd = None
+            sim_utils = None
 
         # Bounds are in meters relative to parent prim; in this env parent is /World/Origin1.
         # IMPORTANT: keep using the configured Z spawn band (often well above the table) so objects
@@ -547,13 +601,49 @@ def run(args: argparse.Namespace) -> int:
             ]
 
         sim_view = SimulationManager.get_physics_sim_view()
+        # Convert parent-relative spawn coordinates into world coordinates using the scene origin.
+        # (For single-env this is usually zero, but multi-origin scenes offset /World/Origin1.)
+        origin0 = None
+        try:
+            origin0 = torch.tensor(scene_origins[0], device=sim.device).view(-1)  # type: ignore[name-defined]
+        except Exception:
+            origin0 = None
+
         for prim_path, pos in zip(paths, positions):
             try:
-                rb_view = sim_view.create_rigid_body_view(str(prim_path))
+                rb_path = str(prim_path)
+                try:
+                    if UsdPhysics is not None and omni_usd is not None and sim_utils is not None:
+                        stage = omni_usd.get_context().get_stage()  # type: ignore[union-attr]
+                        root = stage.GetPrimAtPath(str(prim_path))
+                        if root.IsValid() and root.HasAPI(UsdPhysics.RigidBodyAPI):  # type: ignore[union-attr]
+                            rb_path = str(prim_path)
+                        else:
+                            get_all_matching_child_prims = getattr(sim_utils, "get_all_matching_child_prims", None)
+                            if callable(get_all_matching_child_prims):
+                                rigid_prims = get_all_matching_child_prims(
+                                    str(prim_path),
+                                    predicate=lambda p: p.HasAPI(UsdPhysics.RigidBodyAPI),  # type: ignore[union-attr]
+                                    traverse_instance_prims=False,
+                                )
+                                if rigid_prims:
+                                    try:
+                                        rb_path = rigid_prims[0].GetPath().pathString
+                                    except Exception:
+                                        rb_path = str(prim_path)
+                except Exception:
+                    rb_path = str(prim_path)
+
+                rb_view = sim_view.create_rigid_body_view(str(rb_path))
                 yaw = random.uniform(-math.pi, math.pi)
                 qw, qx, qy, qz = _yaw_quat_wxyz(yaw)
                 # RigidBodyView transform format: [x,y,z,qx,qy,qz,qw]
-                tf = torch.tensor([[float(pos[0]), float(pos[1]), float(pos[2]), float(qx), float(qy), float(qz), float(qw)]], device=sim.device)
+                px, py, pz = float(pos[0]), float(pos[1]), float(pos[2])
+                if origin0 is not None and origin0.numel() >= 3:
+                    px += float(origin0[0].item())
+                    py += float(origin0[1].item())
+                    pz += float(origin0[2].item())
+                tf = torch.tensor([[px, py, pz, float(qx), float(qy), float(qz), float(qw)]], device=sim.device)
                 if hasattr(rb_view, "set_transforms"):
                     rb_view.set_transforms(tf)
                 if hasattr(rb_view, "set_linear_velocities"):
@@ -605,13 +695,20 @@ def run(args: argparse.Namespace) -> int:
             camera_sensor = None
 
     # Controller
+    # Smoother default for planner execution (keyboard teleop can remain snappier).
+    # We keep user-provided --speed for keyboard mode, but default to --planner-speed-mps for planner mode.
+    _control_mode_tmp = str(getattr(args, "control", "keyboard"))
+    linear_speed_mps = float(getattr(args, "speed", 0.7))
+    if _control_mode_tmp == "planner":
+        linear_speed_mps = float(getattr(args, "planner_speed_mps", 0.25))
+
     ctrl_cfg = CartesianVelocityJogConfig(
         ee_link_name=str(getattr(args, "ee_link", "j2n6s300_end_effector")),
         device=str(sim.device),
         use_relative_mode=True,
-        linear_speed_mps=float(getattr(args, "speed", 0.7)),
+        linear_speed_mps=float(linear_speed_mps),
         workspace_min=(0.20, -0.45, float(getattr(args, "workspace_min_z", 0.0))),
-        workspace_max=(0.6, 0.45, float(getattr(args, "workspace_max_z", 0.35))),
+        workspace_max=(0.6, 0.45, float(getattr(args, "workspace_max_z", 1.20))),
         log_ee_pos=bool(getattr(args, "print_ee", False)),
         log_ee_frame=str(getattr(args, "ee_frame", "world")),
         log_every_n_steps=int(getattr(args, "print_interval", 1)),
@@ -639,6 +736,32 @@ def run(args: argparse.Namespace) -> int:
         from motion_generation.mogen import MotionGenerationAgent
         from motion_generation.planners import PlannerContext, create_planner
         from utilities import get_ee_pos_base_frame
+
+        def _densify_waypoints_b(
+            pts: list[tuple[float, float, float]],
+            *,
+            max_seg_m: float,
+        ) -> list[tuple[float, float, float]]:
+            """Linear interpolation between waypoints to enforce bounded segment length (smoother motion)."""
+            import math
+
+            if not pts or len(pts) < 2:
+                return pts
+            max_seg_m = float(max(1e-6, max_seg_m))
+            out: list[tuple[float, float, float]] = [tuple(map(float, pts[0]))]
+            for (x0, y0, z0), (x1, y1, z1) in zip(pts, pts[1:]):
+                dx = float(x1) - float(x0)
+                dy = float(y1) - float(y0)
+                dz = float(z1) - float(z0)
+                dist = math.sqrt(dx * dx + dy * dy + dz * dz)
+                if dist <= max_seg_m:
+                    out.append((float(x1), float(y1), float(z1)))
+                    continue
+                n = int(math.ceil(dist / max_seg_m))
+                for i in range(1, n + 1):
+                    t = float(i) / float(n)
+                    out.append((float(x0 + t * dx), float(y0 + t * dy), float(z0 + t * dz)))
+            return out
 
         if loader is None or len(spawned_paths) == 0:
             print("[VLA_V1][PLANNER] ERROR: planner control requires spawned objects to grasp.")
@@ -995,6 +1118,10 @@ def run(args: argparse.Namespace) -> int:
                         "open_left": int(getattr(args, "gripper_open_steps", 10)),
                         "close_left": int(getattr(args, "gripper_close_steps", 60)),
                         "stabilize_left": int(getattr(args, "stabilize_steps", 300)),
+                        # IMPORTANT: `steps` is reset to 0 every episode. If we keep a previous episode's
+                        # `last_plan_step`, replanning can be throttled for the entire next episode
+                        # (because `steps - last_plan_step` stays negative and thus < cooldown).
+                        "last_plan_step": -10**9,
                         "hold_after_close_left": int(getattr(args, "hold_after_close_steps", 30)),
                         "open_queued": False,
                         "close_queued": False,
@@ -1089,195 +1216,327 @@ def run(args: argparse.Namespace) -> int:
                                         # Hold position and wait for cooldown.
                                         pass
                                     else:
+                                        # IMPORTANT: target is selected ONCE per episode and must remain stable.
+                                        # Do not re-select per tick (that causes "Obj_01 always" bugs + inconsistent logs).
                                         target_prim = vla_planner_state.get("target_prim", None)
-                                    if not target_prim:
-                                        target_prim = _select_episode_target_prim(ep)
-                                        vla_planner_state["target_prim"] = target_prim
-                                    if not target_prim:
-                                        raise RuntimeError("[VLA_V1][PLANNER] No target prim available for this episode.")
+                                        if not target_prim:
+                                            raise RuntimeError("[VLA_V1][PLANNER] No target prim available for this episode.")
 
-                                    # Adaptive depth: if retries happen, go slightly deeper (more negative) per attempt.
-                                    attempt_idx = int(vla_planner_state.get("attempt_idx", 0))
-                                    base_depth = float(getattr(args, "grasp_depth", -0.04))
-                                    depth_step = float(getattr(args, "grasp_depth_step", -0.02))
-                                    grasp_depth_eff = base_depth + float(attempt_idx) * depth_step
+                                        # Adaptive depth: if retries happen, go slightly deeper (more negative) per attempt.
+                                        attempt_idx = int(vla_planner_state.get("attempt_idx", 0))
+                                        base_depth = float(getattr(args, "grasp_depth", -0.04))
+                                        depth_step = float(getattr(args, "grasp_depth_step", -0.02))
+                                        grasp_depth_eff = base_depth + float(attempt_idx) * depth_step
 
-                                    _pos_w, _quat_wxyz_w, pos_b, quat_b = agent.compute_current_grasp_for_prim(str(target_prim))
-                                    # Cache goals for gating and success checks.
-                                    # NOTE: pos_b from grasp provider is (x,y,top_z) in base frame.
-                                    gx, gy, gz = float(pos_b[0]), float(pos_b[1]), float(pos_b[2])
-                                    ee_z_offset = float(getattr(args, "ee_z_offset_m", 0.0))
-                                    # Convert a "contact point" on the object into an EE-link target by shifting upward.
-                                    # This prevents commanding the wrist/palm inside the object volume.
-                                    gz_ee = gz + ee_z_offset
-                                    # Clamp grasp depth so the requested grasp Z is reachable under workspace_min_z.
-                                    # Otherwise the controller will clamp Z and the waypoint follower will never "arrive",
-                                    # resulting in a hover/stall and never entering the close-gripper stage.
-                                    try:
-                                        z_floor = float(getattr(ctrl_cfg.safety_cfg, "workspace_min", (None, None, 0.0))[2] or 0.0)
-                                        min_grasp_z = z_floor + 0.005  # small clearance above floor
-                                        desired_z = gz_ee + float(grasp_depth_eff)
-                                        if desired_z < min_grasp_z:
-                                            old = float(grasp_depth_eff)
-                                            grasp_depth_eff = float(min_grasp_z - gz_ee)
-                                            session_logger.log_event(
-                                                "debug",
-                                                {
-                                                    "episode_idx": int(ep),
-                                                    "event": "CLAMP_GRASP_DEPTH",
-                                                    "gz": float(gz),
-                                                    "gz_ee": float(gz_ee),
-                                                    "desired_grasp_z": float(desired_z),
-                                                    "min_grasp_z": float(min_grasp_z),
-                                                    "grasp_depth_old": float(old),
-                                                    "grasp_depth_new": float(grasp_depth_eff),
-                                                },
-                                            )
-                                    except Exception:
-                                        pass
-                                    grasp_goal_b = (
-                                        gx,
-                                        gy,
-                                        gz_ee + float(grasp_depth_eff),
-                                    )
-                                    vla_planner_state["grasp_goal_b"] = grasp_goal_b
-
-                                    # Provide cuRobo with a proper start_state (required by some MotionGen builds).
-                                    try:
-                                        if hasattr(planner, "set_start_state") and _arm_joint_ids is not None and len(_arm_joint_ids) > 0:
-                                            q = robot.data.joint_pos[0, _arm_joint_ids].detach().to("cpu").tolist()
-                                            planner.set_start_state(joint_pos=[float(v) for v in q], joint_names=_arm_joint_names)
-                                    except Exception:
-                                        pass
-
-                                    # Sync cuRobo world from scene before planning.
-                                    ok = False
-                                    # Treat *other objects* (and optionally table) as obstacles to avoid collisions.
-                                    obstacle_prims = [str(p) for p in list(spawned_paths) if str(p) != str(target_prim)]
-                                    if bool(getattr(args, "curobo_world_from_scene", False)):
-                                        if bool(getattr(args, "curobo_world_include_table", True)):
-                                            obstacle_prims = ["/World/Origin1/Table"] + obstacle_prims
+                                        _pos_w, _quat_wxyz_w, pos_b, quat_b = agent.compute_current_grasp_for_prim(str(target_prim))
+                                        # Cache goals for gating and success checks.
+                                        # NOTE: pos_b from grasp provider is (x,y,top_z) in base frame.
+                                        gx, gy, gz = float(pos_b[0]), float(pos_b[1]), float(pos_b[2])
+                                        ee_z_offset = float(getattr(args, "ee_z_offset_m", 0.0))
+                                        # Convert a "contact point" on the object into an EE-link target by shifting upward.
+                                        # This prevents commanding the wrist/palm inside the object volume.
+                                        gz_ee = gz + ee_z_offset
+                                        # Clamp grasp depth so the requested grasp Z is reachable under workspace_min_z.
                                         try:
-                                            if hasattr(planner, "update_world_from_prim_paths"):
-                                                ok = bool(planner.update_world_from_prim_paths(sim=sim, robot=robot, prim_paths=obstacle_prims))
+                                            z_floor = float(getattr(ctrl_cfg.safety_cfg, "workspace_min", (None, None, 0.0))[2] or 0.0)
+                                            min_grasp_z = z_floor + 0.005  # small clearance above floor
+                                            desired_z = gz_ee + float(grasp_depth_eff)
+                                            if desired_z < min_grasp_z:
+                                                old = float(grasp_depth_eff)
+                                                grasp_depth_eff = float(min_grasp_z - gz_ee)
+                                                session_logger.log_event(
+                                                    "debug",
+                                                    {
+                                                        "episode_idx": int(ep),
+                                                        "event": "CLAMP_GRASP_DEPTH",
+                                                        "gz": float(gz),
+                                                        "gz_ee": float(gz_ee),
+                                                        "desired_grasp_z": float(desired_z),
+                                                        "min_grasp_z": float(min_grasp_z),
+                                                        "grasp_depth_old": float(old),
+                                                        "grasp_depth_new": float(grasp_depth_eff),
+                                                    },
+                                                )
                                         except Exception:
-                                            ok = False
+                                            pass
+                                        grasp_goal_b = (
+                                            gx,
+                                            gy,
+                                            gz_ee + float(grasp_depth_eff),
+                                        )
+                                        vla_planner_state["grasp_goal_b"] = grasp_goal_b
+
+                                        # Provide cuRobo with a proper start_state (required by some MotionGen builds).
+                                        try:
+                                            if hasattr(planner, "set_start_state") and _arm_joint_ids is not None and len(_arm_joint_ids) > 0:
+                                                q = robot.data.joint_pos[0, _arm_joint_ids].detach().to("cpu").tolist()
+                                                planner.set_start_state(joint_pos=[float(v) for v in q], joint_names=_arm_joint_names)
+                                        except Exception:
+                                            pass
+
+                                        # Sync cuRobo world from scene before planning.
+                                        ok = False
+                                        obstacle_prims = [str(p) for p in list(spawned_paths) if str(p) != str(target_prim)]
+                                        use_world = bool(getattr(args, "curobo_world_from_scene", True)) and (not bool(getattr(args, "no_curobo_world_from_scene", False)))
+                                        if bool(use_world):
+                                            if bool(getattr(args, "curobo_world_include_table", True)):
+                                                obstacle_prims = ["/World/Origin1/Table"] + obstacle_prims
+                                            try:
+                                                if hasattr(planner, "update_world_from_prim_paths"):
+                                                    ok = bool(planner.update_world_from_prim_paths(sim=sim, robot=robot, prim_paths=obstacle_prims))
+                                            except Exception:
+                                                ok = False
+                                            session_logger.log_event(
+                                                "action_start",
+                                                {"action": "CUROBO_UPDATE_WORLD", "ok": bool(ok), "n_prims": int(len(obstacle_prims)), "episode_idx": int(ep)},
+                                            )
+                                        if ep == 0 and steps < 5:
+                                            print(f"[VLA_V1][CUROBO] update_world_from_scene ok={ok} n_prims={len(obstacle_prims)}")
+
                                         session_logger.log_event(
                                             "action_start",
-                                            {"action": "CUROBO_UPDATE_WORLD", "ok": bool(ok), "n_prims": int(len(obstacle_prims)), "episode_idx": int(ep)},
+                                            {
+                                                "action": "PLAN_TO_PREGRASP",
+                                                "planner": str(getattr(args, "planner", "curobo_v2")),
+                                                "target_prim": str(target_prim),
+                                                "episode_idx": int(ep),
+                                            },
                                         )
-                                    if ep == 0 and steps < 5:
-                                        print(f"[VLA_V1][CUROBO] update_world_from_scene ok={ok} n_prims={len(obstacle_prims)}")
-
-                                    session_logger.log_event(
-                                        "action_start",
-                                        {"action": "PLAN_TO_PREGRASP", "planner": str(getattr(args, "planner", "curobo_v2")), "target_prim": str(target_prim), "episode_idx": int(ep)},
-                                    )
-                                    waypoints = planner.plan_to_pose_b(
-                                        target_pos_b=(gx, gy, gz_ee),
-                                        target_quat_b_wxyz=None if bool(getattr(args, "ignore_grasp_orientation", True)) else quat_b,
-                                        pregrasp_offset_m=float(getattr(args, "pregrasp", 0.10)),
-                                        grasp_depth_m=float(grasp_depth_eff),
-                                        lift_height_m=float(getattr(args, "lift", 0.15)),
-                                    )
-                                    vla_planner_state["last_plan_step"] = int(steps)
-                                    session_logger.log_event("action_end", {"action": "PLAN_TO_PREGRASP", "n_waypoints": int(len(waypoints)), "episode_idx": int(ep)})
-
-                                    if len(waypoints) >= 2:
-                                        lift_pt = waypoints[-1]
-                                        approach_pts = waypoints[:-1]
-                                    else:
-                                        lift_pt = (
-                                            float(pos_b[0]),
-                                            float(pos_b[1]),
-                                            float(pos_b[2] + float(getattr(args, "lift", 0.15))),
+                                        waypoints = planner.plan_to_pose_b(
+                                            target_pos_b=(gx, gy, gz_ee),
+                                            target_quat_b_wxyz=None if bool(getattr(args, "ignore_grasp_orientation", True)) else quat_b,
+                                            pregrasp_offset_m=float(getattr(args, "pregrasp", 0.10)),
+                                            grasp_depth_m=float(grasp_depth_eff),
+                                            lift_height_m=float(getattr(args, "lift", 0.15)),
                                         )
-                                        approach_pts = waypoints
+                                        vla_planner_state["last_plan_step"] = int(steps)
+                                        session_logger.log_event(
+                                            "action_end",
+                                            {"action": "PLAN_TO_PREGRASP", "n_waypoints": int(len(waypoints)), "episode_idx": int(ep)},
+                                        )
 
-                                    vla_planner_state["target_prim"] = target_prim
-                                    vla_planner_state["lift_pt"] = lift_pt
-                                    # Last approach point should be the grasp depth point (per curobo_v2 planner).
-                                    try:
-                                        if len(approach_pts) > 0:
-                                            vla_planner_state["approach_goal_b"] = tuple(map(float, approach_pts[-1]))
+                                        if len(waypoints) >= 2:
+                                            lift_pt = waypoints[-1]
+                                            approach_pts = waypoints[:-1]
                                         else:
-                                            vla_planner_state["approach_goal_b"] = tuple(map(float, grasp_goal_b))
-                                    except Exception:
-                                        vla_planner_state["approach_goal_b"] = tuple(map(float, grasp_goal_b))
-                                    vla_planner_state["stage"] = "approach"
-                                    vla_planner_state["lift_queued"] = False
-                                    vla_planner_state["approach_start_step"] = int(steps)
+                                            lift_pt = (
+                                                float(pos_b[0]),
+                                                float(pos_b[1]),
+                                                float(pos_b[2] + float(getattr(args, "lift", 0.15))),
+                                            )
+                                            approach_pts = waypoints
 
-                                    controller.set_mode("translate")
-                                    session_logger.log_event("action_start", {"action": "EXECUTE_WAYPOINTS", "n_waypoints": int(len(approach_pts)), "episode_idx": int(ep)})
-                                    wp.set_waypoints_b([(float(x), float(y), float(z)) for (x, y, z) in approach_pts])
+                                        vla_planner_state["lift_pt"] = lift_pt
+                                        try:
+                                            if len(approach_pts) > 0:
+                                                vla_planner_state["approach_goal_b"] = tuple(map(float, approach_pts[-1]))
+                                            else:
+                                                vla_planner_state["approach_goal_b"] = tuple(map(float, grasp_goal_b))
+                                        except Exception:
+                                            vla_planner_state["approach_goal_b"] = tuple(map(float, grasp_goal_b))
+
+                                        vla_planner_state["stage"] = "approach"
+                                        vla_planner_state["lift_queued"] = False
+                                        vla_planner_state["approach_start_step"] = int(steps)
+
+                                        # Densify for smoother execution (smaller per-step corrections => less jitter).
+                                        max_seg = float(getattr(args, "planner_waypoint_max_seg_m", 0.02))
+                                        approach_pts_dense = _densify_waypoints_b(
+                                            [(float(x), float(y), float(z)) for (x, y, z) in approach_pts],
+                                            max_seg_m=max_seg,
+                                        )
+
+                                        controller.set_mode("translate")
+                                        session_logger.log_event(
+                                            "action_start",
+                                            {"action": "EXECUTE_WAYPOINTS", "n_waypoints": int(len(approach_pts_dense)), "episode_idx": int(ep)},
+                                        )
+                                        wp.set_waypoints_b(approach_pts_dense)
 
                             if str(vla_planner_state.get("stage", "")) == "approach":
-                                # Absolute time-based escape hatch: always make progress to closing.
+                                # Absolute time-based escape hatch: prevent infinite hover in approach.
+                                # IMPORTANT: do NOT close in mid-air when far from the grasp goal (that causes
+                                # "grazing" + empty lifts). Instead, treat it as a failed attempt and retry/restart.
                                 try:
                                     start_step = vla_planner_state.get("approach_start_step", None)
                                     if start_step is not None:
-                                        force_after = int(getattr(args, "force_close_after_approach_steps", 900))
+                                        force_after = int(getattr(args, "force_close_after_approach_steps", 2400))
                                         if int(steps) - int(start_step) >= force_after:
+                                            # Compute distance to the final approach goal (if available). If we don't know
+                                            # the distance, we should also avoid closing.
+                                            goal = vla_planner_state.get("approach_goal_b", None)
+                                            dist_m_timeout = None
+                                            try:
+                                                if goal is not None:
+                                                    ee_pos_b = get_ee_pos_base_frame(
+                                                        robot, str(getattr(args, "ee_link", "j2n6s300_end_effector"))
+                                                    )
+                                                    if ee_pos_b is not None:
+                                                        dx = float(ee_pos_b[0]) - float(goal[0])
+                                                        dy = float(ee_pos_b[1]) - float(goal[1])
+                                                        dz = float(ee_pos_b[2]) - float(goal[2])
+                                                        dist_m_timeout = (dx * dx + dy * dy + dz * dz) ** 0.5
+                                            except Exception:
+                                                dist_m_timeout = None
+                                            close_within_m = float(getattr(args, "close_if_within_m", 0.015))
                                             session_logger.log_event(
                                                 "action_start",
-                                                {"action": "FORCE_CLOSE_TIMEOUT", "steps_in_approach": int(steps) - int(start_step), "episode_idx": int(ep)},
+                                                {
+                                                    "action": "APPROACH_TIMEOUT",
+                                                    "steps_in_approach": int(steps) - int(start_step),
+                                                    "dist_m": dist_m_timeout,
+                                                    "close_within_m": float(close_within_m),
+                                                    "episode_idx": int(ep),
+                                                },
                                             )
                                             try:
                                                 wp.set_waypoints_b([])
                                             except Exception:
                                                 pass
-                                            vla_planner_state["stage"] = "close"
-                                            vla_planner_state["close_queued"] = False
-                                            vla_planner_state["close_left"] = int(getattr(args, "gripper_close_steps", 60))
+                                            if dist_m_timeout is not None and dist_m_timeout <= close_within_m:
+                                                # We are close enough: proceed to close.
+                                                vla_planner_state["stage"] = "close"
+                                                vla_planner_state["close_queued"] = False
+                                                vla_planner_state["close_left"] = int(getattr(args, "gripper_close_steps", 60))
+                                            else:
+                                                # Too far (or unknown distance): count as a failed attempt.
+                                                attempt = int(vla_planner_state.get("attempt_idx", 0)) + 1
+                                                vla_planner_state["attempt_idx"] = attempt
+                                                session_logger.log_event(
+                                                    "grasp_result",
+                                                    {
+                                                        "episode_idx": int(ep),
+                                                        "ok": False,
+                                                        "reason": "approach_timeout",
+                                                        "attempt_idx": int(attempt),
+                                                        "dist_m": dist_m_timeout,
+                                                    },
+                                                )
+                                                if attempt < int(getattr(args, "max_grasp_attempts", 3)):
+                                                    vla_planner_state["stage"] = "init_open"
+                                                    vla_planner_state["open_left"] = int(getattr(args, "gripper_open_steps", 10))
+                                                    vla_planner_state["open_queued"] = False
+                                                    vla_planner_state["close_queued"] = False
+                                                    vla_planner_state["lift_queued"] = False
+                                                    vla_planner_state["stabilize_left"] = int(getattr(args, "stabilize_steps", 300))
+                                                    vla_planner_state["approach_last_dist_m"] = None
+                                                    vla_planner_state["approach_stall_steps"] = 0
+                                                    vla_planner_state["approach_start_step"] = None
+                                                    vla_planner_state["last_plan_step"] = -10**9
+                                                    try:
+                                                        controller.set_mode("gripper")
+                                                    except Exception:
+                                                        pass
+                                                else:
+                                                    vla_planner_state["stage"] = "done"
                                 except Exception:
                                     pass
 
-                                # If we're stuck pressing into the object (contact-stall), we may never reach the exact
-                                # grasp waypoint. Detect lack of progress and force a close so we don't "sleep" forever.
-                                try:
-                                    goal = vla_planner_state.get("approach_goal_b", None)
-                                    ee_pos_b = get_ee_pos_base_frame(robot, str(getattr(args, "ee_link", "j2n6s300_end_effector")))
-                                    if goal is not None and ee_pos_b is not None:
-                                        dx = float(ee_pos_b[0]) - float(goal[0])
-                                        dy = float(ee_pos_b[1]) - float(goal[1])
-                                        dz = float(ee_pos_b[2]) - float(goal[2])
-                                        dist_m_now = (dx * dx + dy * dy + dz * dz) ** 0.5
-                                        last = vla_planner_state.get("approach_last_dist_m", None)
-                                        eps = float(getattr(args, "approach_stall_eps_m", 5e-4))
-                                        if last is not None and dist_m_now > (float(last) - eps):
-                                            vla_planner_state["approach_stall_steps"] = int(vla_planner_state.get("approach_stall_steps", 0)) + 1
-                                        else:
-                                            vla_planner_state["approach_stall_steps"] = 0
-                                        vla_planner_state["approach_last_dist_m"] = float(dist_m_now)
+                                # If we switched out of "approach" due to timeout above, skip the remaining
+                                # approach handlers for this step (prevents clobbering stage transitions).
+                                if str(vla_planner_state.get("stage", "")) == "approach":
+                                    # If we're stuck pressing into the object (contact-stall), we may never reach the exact
+                                    # grasp waypoint. Detect lack of progress and force a close so we don't "sleep" forever.
+                                    try:
+                                        goal = vla_planner_state.get("approach_goal_b", None)
+                                        ee_pos_b = get_ee_pos_base_frame(robot, str(getattr(args, "ee_link", "j2n6s300_end_effector")))
+                                        if goal is not None and ee_pos_b is not None:
+                                            dx = float(ee_pos_b[0]) - float(goal[0])
+                                            dy = float(ee_pos_b[1]) - float(goal[1])
+                                            dz = float(ee_pos_b[2]) - float(goal[2])
+                                            dist_m_now = (dx * dx + dy * dy + dz * dz) ** 0.5
+                                            # Defaults so downstream checks are always well-defined.
+                                            in_grace = False
+                                            stall_steps = 0
+                                            stall_thresh = 10**9
+                                            close_within_m = float(getattr(args, "close_if_within_m", 0.015))
+                                            if dist_m_now <= close_within_m:
+                                                # Close only when we are genuinely near the grasp goal.
+                                                try:
+                                                    wp.set_waypoints_b([])
+                                                except Exception:
+                                                    pass
+                                                vla_planner_state["stage"] = "close"
+                                                vla_planner_state["close_queued"] = False
+                                                vla_planner_state["close_left"] = int(getattr(args, "gripper_close_steps", 60))
+                                            else:
+                                                # Stall detection (with a grace period) to avoid prematurely resetting
+                                                # at the start of an approach (especially at slower execution speeds).
+                                                in_grace = False
+                                                try:
+                                                    grace = int(getattr(args, "approach_stall_grace_steps", 0))
+                                                    start_step = vla_planner_state.get("approach_start_step", None)
+                                                    if start_step is not None and grace > 0:
+                                                        in_grace = (int(steps) - int(start_step)) < grace
+                                                except Exception:
+                                                    in_grace = False
 
-                                        stall_steps = int(vla_planner_state.get("approach_stall_steps", 0))
-                                        stall_thresh = int(getattr(args, "approach_stall_steps_to_close", 120))
-                                        close_within_m = float(getattr(args, "close_if_within_m", 0.015))
-                                        if dist_m_now <= close_within_m or stall_steps >= stall_thresh:
-                                            # Force transition to close, regardless of waypoint follower state.
-                                            if stall_steps >= stall_thresh:
+                                                if in_grace:
+                                                    vla_planner_state["approach_stall_steps"] = 0
+                                                    vla_planner_state["approach_last_dist_m"] = float(dist_m_now)
+                                                else:
+                                                    last = vla_planner_state.get("approach_last_dist_m", None)
+                                                    eps = float(getattr(args, "approach_stall_eps_m", 2e-4))
+                                                    if last is not None and dist_m_now > (float(last) - eps):
+                                                        vla_planner_state["approach_stall_steps"] = int(vla_planner_state.get("approach_stall_steps", 0)) + 1
+                                                    else:
+                                                        vla_planner_state["approach_stall_steps"] = 0
+                                                    vla_planner_state["approach_last_dist_m"] = float(dist_m_now)
+
+                                                stall_steps = int(vla_planner_state.get("approach_stall_steps", 0))
+                                                stall_thresh = int(getattr(args, "approach_stall_steps_to_close", 900))
+
+                                            if (str(vla_planner_state.get("stage", "")) == "approach") and (not in_grace) and (stall_steps >= stall_thresh):
+                                                # If we are not making progress AND we are not close enough to safely close,
+                                                # treat this as a failed attempt (instead of closing in mid-air).
                                                 session_logger.log_event(
                                                     "action_start",
                                                     {
-                                                        "action": "FORCE_CLOSE_STALL",
+                                                        "action": "APPROACH_STALL",
                                                         "dist_m": float(dist_m_now),
                                                         "stall_steps": int(stall_steps),
                                                         "stall_thresh": int(stall_thresh),
                                                         "episode_idx": int(ep),
                                                     },
                                                 )
-                                            try:
-                                                wp.set_waypoints_b([])
-                                            except Exception:
-                                                pass
-                                            vla_planner_state["stage"] = "close"
-                                            vla_planner_state["close_queued"] = False
-                                            vla_planner_state["close_left"] = int(getattr(args, "gripper_close_steps", 60))
-                                except Exception:
-                                    pass
+                                                attempt = int(vla_planner_state.get("attempt_idx", 0)) + 1
+                                                vla_planner_state["attempt_idx"] = attempt
+                                                session_logger.log_event(
+                                                    "grasp_result",
+                                                    {
+                                                        "episode_idx": int(ep),
+                                                        "ok": False,
+                                                        "reason": "approach_stall",
+                                                        "attempt_idx": int(attempt),
+                                                        "dist_m": float(dist_m_now),
+                                                        "stall_steps": int(stall_steps),
+                                                    },
+                                                )
+                                                try:
+                                                    wp.set_waypoints_b([])
+                                                except Exception:
+                                                    pass
+                                                if attempt < int(getattr(args, "max_grasp_attempts", 3)):
+                                                    vla_planner_state["stage"] = "init_open"
+                                                    vla_planner_state["open_left"] = int(getattr(args, "gripper_open_steps", 10))
+                                                    vla_planner_state["open_queued"] = False
+                                                    vla_planner_state["close_queued"] = False
+                                                    vla_planner_state["lift_queued"] = False
+                                                    vla_planner_state["stabilize_left"] = int(getattr(args, "stabilize_steps", 300))
+                                                    vla_planner_state["approach_last_dist_m"] = None
+                                                    vla_planner_state["approach_stall_steps"] = 0
+                                                    vla_planner_state["approach_start_step"] = None
+                                                    vla_planner_state["last_plan_step"] = -10**9
+                                                    try:
+                                                        controller.set_mode("gripper")
+                                                    except Exception:
+                                                        pass
+                                                else:
+                                                    vla_planner_state["stage"] = "done"
+                                    except Exception:
+                                        pass
 
-                                if len(getattr(wp, "_waypoints_b", [])) == 0:
+                                if str(vla_planner_state.get("stage", "")) == "approach" and len(getattr(wp, "_waypoints_b", [])) == 0:
                                     session_logger.log_event("action_end", {"action": "EXECUTE_WAYPOINTS", "episode_idx": int(ep)})
                                     # Only close if we are actually near the final approach goal; otherwise replan.
                                     ee_pos_b = None
@@ -1297,7 +1556,19 @@ def run(args: argparse.Namespace) -> int:
                                             dist_m = (dx * dx + dy * dy + dz * dz) ** 0.5
                                     except Exception:
                                         dist_m = None
-                                    if dist_m is not None and dist_m > replan_far_m:
+                                    if dist_m is None:
+                                        # Conservative: never close if we don't know we are close enough.
+                                        session_logger.log_event(
+                                            "action_start",
+                                            {"action": "NO_DISTANCE_TO_GOAL", "episode_idx": int(ep)},
+                                        )
+                                        try:
+                                            if goal is not None:
+                                                wp.set_waypoints_b([(float(goal[0]), float(goal[1]), float(goal[2]))])
+                                        except Exception:
+                                            pass
+                                        vla_planner_state["stage"] = "approach"
+                                    elif dist_m > replan_far_m:
                                         session_logger.log_event(
                                             "action_start",
                                             {"action": "REPLAN_TOO_FAR", "dist_m": float(dist_m), "thresh_m": float(replan_far_m), "episode_idx": int(ep)},
@@ -1310,7 +1581,7 @@ def run(args: argparse.Namespace) -> int:
                                         except Exception:
                                             pass
                                         vla_planner_state["stage"] = "approach"
-                                    elif dist_m is not None and dist_m > close_within_m:
+                                    elif dist_m > close_within_m:
                                         session_logger.log_event(
                                             "action_start",
                                             {"action": "HOLD_TOO_FAR_TO_CLOSE", "dist_m": float(dist_m), "thresh_m": float(close_within_m), "episode_idx": int(ep)},
