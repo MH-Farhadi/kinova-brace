@@ -110,13 +110,15 @@ python -m data_collection.collect_data \
   --planner curobo_v2 \
   --device cuda:0 \
   --enable_cameras \
-  --log-rate-hz 10 \
-  --render-rate-hz 60 \
-  --curobo-world-from-scene \
-  --num-episodes 1 \
-  --workspace-min-z -0.02 \
+  --num-episodes 10 \
   --spawn-mode box \
-  --box-size 0.08
+  --planner-speed-mps 0.4 \
+  --planner-waypoint-max-seg-m 0.01 \
+  --target-selection first \
+  --max-steps-per-episode 8000 \
+  --grasp-depth -0.07 \
+  --close-if-within-m 0.005 \
+  --min-distance 0.20
 ```
 
 **Key Arguments:**

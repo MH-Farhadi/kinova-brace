@@ -17,6 +17,17 @@ def add_cli_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--duration-s", type=float, default=30.0)
     parser.add_argument("--control", type=str, default="keyboard", choices=["keyboard", "idle", "planner"])
     parser.add_argument("--image-format", type=str, default="png", choices=["png", "jpg"], help="Image format for saving")
+    # vla_v1: nudge default spawn region slightly away from the robot to reduce "too-close" grasps.
+    # (These args are registered by scripts/cli.add_demo_cli_args before this profile hook runs.)
+    try:
+        parser.set_defaults(spawn_min=[0.28, -0.30, 0.90])
+    except Exception:
+        pass
+    # vla_v1: spread objects out more by default to reduce cluttered grasps (especially for box mode).
+    try:
+        parser.set_defaults(min_distance=0.20)
+    except Exception:
+        pass
     # Workspace safety bounds (base frame). If Z min is too high, the arm can never descend to the grasp depth
     # and will "hover" forever above the object.
     parser.add_argument("--workspace-min-z", type=float, default=0.0, help="Minimum EE z in base frame (m).")
@@ -91,7 +102,7 @@ def add_cli_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--grasp-depth",
         type=float,
-        default=-0.05,
+        default=-0.07,
         help="Grasp depth relative to the estimated object top (m). Negative goes downward.",
     )
     parser.add_argument(
@@ -101,7 +112,15 @@ def add_cli_args(parser: argparse.ArgumentParser) -> None:
         help="Plan with position-only goals (faster/more robust than constraining EE orientation). Default: false.",
     )
     parser.add_argument("--lift", type=float, default=0.15, help="Lift height after grasp (m)")
-    parser.add_argument("--tolerance", type=float, default=0.01, help="Waypoint tolerance for planner control (m)")
+    parser.add_argument(
+        "--post-lift-hold-steps",
+        type=int,
+        default=30,
+        help="Hold steps after reaching lift waypoint before evaluating lift success (helps object catch up).",
+    )
+    # IMPORTANT: This should not be larger than --close-if-within-m; otherwise the waypoint follower may
+    # declare the final approach "done" before we are allowed to close, leading to hover/requeue loops.
+    parser.add_argument("--tolerance", type=float, default=0.005, help="Waypoint tolerance for planner control (m)")
     parser.add_argument("--stabilize-steps", type=int, default=300, help="Hold steps before first plan (physics settle)")
     parser.add_argument("--gripper-open-steps", type=int, default=10, help="Steps to open gripper before approach")
     parser.add_argument("--gripper-close-steps", type=int, default=60, help="Steps to close gripper at grasp")
@@ -114,7 +133,7 @@ def add_cli_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--close-if-within-m",
         type=float,
-        default=0.015,
+        default=0.005,
         help="Only start closing gripper if EE is within this distance of the final approach goal.",
     )
     parser.add_argument(
@@ -177,13 +196,31 @@ def add_cli_args(parser: argparse.ArgumentParser) -> None:
         default=0.06,
         help="Success threshold: target object must be at least this much above table height after lift.",
     )
+    parser.add_argument(
+        "--lift-success-confirm-steps",
+        type=int,
+        default=10,
+        help="Require lift success to hold for N consecutive physics steps before ending the episode (filters spikes).",
+    )
+    parser.add_argument(
+        "--lift-success-check-stride",
+        type=int,
+        default=5,
+        help="Check lift success every N physics steps while lifting (smaller = more responsive, bigger = cheaper).",
+    )
+    parser.add_argument(
+        "--spawn-min-robot-dist",
+        type=float,
+        default=0.30,
+        help="Minimum XY distance from robot base for object spawn/respawn sampling (m).",
+    )
 
     # Episode control (NEW in v1.1): end after grasp+lift, then reset and repeat.
     parser.add_argument("--num-episodes", type=int, default=10, help="Number of episodes to run (planner mode)")
     parser.add_argument(
         "--max-steps-per-episode",
         type=int,
-        default=3000,
+        default=8000,
         help="Hard cap on physics steps per episode to avoid getting stuck",
     )
     parser.add_argument(
@@ -201,9 +238,19 @@ def add_cli_args(parser: argparse.ArgumentParser) -> None:
         ),
     )
     parser.add_argument(
+        "--respawn-every-n-episodes",
+        type=int,
+        default=0,
+        help=(
+            "Re-randomize object poses every N episodes in planner mode. "
+            "If 0 (default), respawn once per full target cycle (i.e., every num_objects episodes). "
+            "Use 1 to respawn every episode."
+        ),
+    )
+    parser.add_argument(
         "--no-respawn-each-episode",
         action="store_true",
-        help="Disable per-episode object pose randomization (planner mode defaults to respawn each episode).",
+        help="Disable object pose randomization between episodes (planner mode defaults to respawn once per target cycle).",
     )
     parser.add_argument(
         "--settle-steps",
@@ -229,13 +276,13 @@ def add_cli_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--planner-speed-mps",
         type=float,
-        default=0.325,
+        default=0.4,
         help="Planner execution linear speed (m/s). Used only for --control planner.",
     )
     parser.add_argument(
         "--planner-waypoint-max-seg-m",
         type=float,
-        default=0.02,
+        default=0.01,
         help="Max segment length (m) after waypoint densification for smoother execution.",
     )
     parser.add_argument(
@@ -354,6 +401,35 @@ def run(args: argparse.Namespace) -> int:
     id_to_label: Dict[str, str] = {}
     loader: ObjectLoader | None = None
 
+    # Box appearance + language grounding (used only when spawn_mode="box").
+    # Keep this stable/deterministic so logs are consistent for VLA training.
+    BOX_COLORS: list[tuple[str, tuple[float, float, float]]] = [
+        ("red", (0.85, 0.20, 0.20)),
+        ("blue", (0.20, 0.35, 0.90)),
+        ("yellow", (0.95, 0.85, 0.20)),
+        ("purple", (0.65, 0.25, 0.80)),
+        ("orange", (0.95, 0.55, 0.15)),
+        ("cyan", (0.15, 0.80, 0.85)),
+    ]
+
+    def _box_idx_from_leaf(leaf: str) -> Optional[int]:
+        try:
+            if "_" in leaf:
+                return int(str(leaf).split("_")[-1])
+            return None
+        except Exception:
+            return None
+
+    def _box_desc_from_prim(prim_path: str) -> tuple[str, Optional[str], Optional[int]]:
+        """Return (human_label, color_name, box_idx) for box mode; otherwise best-effort label."""
+        leaf = str(prim_path).split("/")[-1]
+        idx = _box_idx_from_leaf(leaf)
+        if idx is not None and len(BOX_COLORS) > 0:
+            color_name = BOX_COLORS[(idx - 1) % len(BOX_COLORS)][0]
+            return f"{color_name} box {idx}", color_name, idx
+        # Fallback
+        return f"box {leaf}", None, idx
+
     def _yaw_quat_wxyz(yaw_rad: float) -> tuple[float, float, float, float]:
         import math
 
@@ -379,14 +455,24 @@ def run(args: argparse.Namespace) -> int:
             box_size = float(getattr(args, "box_size", 0.05))
             
             phys_loader_kwargs = object_loader_kwargs_from_physix(phys)
+            _min_dist = float(getattr(args, "min_distance", 0.1))
+            # For box mode we care about tabletop spacing (XY), even if we spawn at different Z.
+            _min_dist_xy_only = (spawn_mode == "box")
+            # Ensure a reasonable minimum spacing for stable clutter-free grasps.
+            if _min_dist_xy_only:
+                _min_dist = max(_min_dist, 0.20)
             loader_cfg = ObjectLoaderConfig(
                 dataset_dirs=[ycb_dir],
                 bounds=SpawnBounds(min_xyz=tuple(args.spawn_min), max_xyz=tuple(args.spawn_max)),
-                min_distance=float(getattr(args, "min_distance", 0.1)),
+                min_distance=float(_min_dist),
+                min_distance_xy_only=bool(_min_dist_xy_only),
                 uniform_scale_range=scale_range,
                 spawn_mode=spawn_mode,
                 box_size_min=(box_size, box_size, box_size),
                 box_size_max=(box_size, box_size, box_size),
+                # Visual-only: per-box colors in box mode (does not affect physics).
+                box_color_palette=[rgb for (_name, rgb) in BOX_COLORS],
+                box_color_names=[name for (name, _rgb) in BOX_COLORS],
                 **phys_loader_kwargs,
             )
             loader = ObjectLoader(loader_cfg)
@@ -398,6 +484,16 @@ def run(args: argparse.Namespace) -> int:
             lbl_map = {str(p).split("/")[-1]: str(lbl) for p, lbl in prim_to_label.items()}
         except Exception:
             lbl_map = {}
+
+        # For box mode, override labels to include color + number (useful for training + debugging).
+        try:
+            if str(getattr(args, "spawn_mode", "usd")) == "box":
+                for p in paths:
+                    leaf = str(p).split("/")[-1]
+                    human, _color, _idx = _box_desc_from_prim(str(p))
+                    lbl_map[leaf] = human
+        except Exception:
+            pass
         return paths, lbl_map
 
     # IMPORTANT: spawn objects once up-front so planner mode has a loader + targets available.
@@ -507,6 +603,68 @@ def run(args: argparse.Namespace) -> int:
             return candidates[ep_idx % len(candidates)]
         return candidates[0] if candidates else None
 
+    def _make_language_command(
+        *,
+        ep_idx: int,
+        target_prim: str,
+    ) -> tuple[str, dict]:
+        """Generate a natural-language instruction for VLA training (vla_v1 only)."""
+        leaf = str(target_prim).split("/")[-1]
+        human_label = _prim_label(str(target_prim)) or leaf
+        # If we're in box mode and have a nice descriptor, use it.
+        color_name = None
+        box_idx = None
+        try:
+            if str(getattr(args, "spawn_mode", "usd")) == "box":
+                human_label, color_name, box_idx = _box_desc_from_prim(str(target_prim))
+        except Exception:
+            pass
+
+        templates = [
+            "Pick up the {label}.",
+            "Reach and pick up the {label}.",
+            "Go to the {label} and grasp it.",
+            "Grab the {label} and lift it.",
+            "Please pick up the {label}.",
+            "Move to the {label} and pick it up.",
+        ]
+        # Add more specific box templates when possible.
+        if box_idx is not None:
+            templates += [
+                "Pick up box number {box_idx}.",
+                "Go for box {box_idx} and pick it up.",
+                "Grasp box {box_idx} and lift it.",
+            ]
+        if color_name is not None:
+            templates += [
+                "Pick up the {color} box.",
+                "Reach to the {color} box and pick it up.",
+                "Grab the {color} box and lift it.",
+            ]
+        if (box_idx is not None) and (color_name is not None):
+            templates += [
+                "Pick up the {color} box (box {box_idx}).",
+                "Go to box {box_idx} — the {color} one — and pick it up.",
+            ]
+
+        # Deterministic per episode (stable dataset, still diverse across episodes).
+        try:
+            import random as _random
+
+            rng = _random.Random(int(ep_idx) + 1337)
+            tmpl = rng.choice(templates)
+        except Exception:
+            tmpl = templates[0]
+
+        cmd = tmpl.format(label=human_label, color=str(color_name), box_idx=str(box_idx))
+        meta = {
+            "target_leaf": leaf,
+            "target_label": human_label,
+            "box_idx": box_idx,
+            "color": color_name,
+        }
+        return cmd, meta
+
     def _table_z() -> float:
         try:
             t = getattr(DEFAULT_SCENE, "table_translation", (0.0, 0.0, 0.8))
@@ -525,14 +683,25 @@ def run(args: argparse.Namespace) -> int:
             return None
         return None
 
-    def _rerandomize_object_poses(paths: list[str]) -> None:
-        """Teleport existing objects to new random poses (no delete/recreate).
+    def _rerandomize_object_poses(
+        paths: list[str],
+        *,
+        poses: Optional[list[tuple[tuple[float, float, float], float]]] = None,
+    ) -> Optional[list[tuple[tuple[float, float, float], float]]]:
+        """Teleport existing objects to poses (or new random poses) without delete/recreate.
 
         This avoids PhysX GPU tensor crashes that can happen if we destroy and recreate
         dynamic rigid bodies while tensor views exist.
+
+        Args:
+            paths: Object root prim paths (e.g. /World/Origin1/Objects/Obj_01).
+            poses: Optional list of (position_xyz, yaw_rad) to apply. If None, new poses are sampled.
+
+        Returns:
+            The poses actually applied as a list of (position_xyz, yaw_rad), or None on failure.
         """
         if not paths:
-            return
+            return None
         try:
             import random
             import math
@@ -540,7 +709,7 @@ def run(args: argparse.Namespace) -> int:
             import importlib
             from isaacsim.core.simulation_manager import SimulationManager
         except Exception:
-            return
+            return None
 
         # Best-effort: locate the *actual* rigid body prim under each object root.
         # Some spawners create a container prim (e.g. Xform) at /Objects/Obj_XX and put the
@@ -569,36 +738,59 @@ def run(args: argparse.Namespace) -> int:
         table_z_guess = float(getattr(DEFAULT_SCENE, "table_translation", (0.0, 0.0, 0.8))[2]) if "DEFAULT_SCENE" in locals() else 0.8
         z_min_safe = max(float(bmin[2]), float(table_z_guess) + 0.05)  # at least 5cm above table plane
 
-        # Rejection sample in XYZ within spawn bounds, with a safety floor above the table.
+        # If caller provided poses, use them; otherwise sample fresh ones.
         positions: list[tuple[float, float, float]] = []
-        tries = 0
-        while len(positions) < len(paths) and tries < 2000:
-            tries += 1
-            x = random.uniform(bmin[0], bmax[0])
-            y = random.uniform(bmin[1], bmax[1])
-            z = random.uniform(z_min_safe, float(bmax[2]))
-            cand = (x, y, z)
-            ok = True
+        yaws: list[float] = []
+        try:
+            if poses is not None and len(poses) == len(paths):
+                positions = [tuple(map(float, p)) for (p, _yaw) in poses]
+                yaws = [float(_yaw) for (_p, _yaw) in poses]
+        except Exception:
+            positions = []
+            yaws = []
+
+        if len(positions) != len(paths) or len(yaws) != len(paths):
+            # Rejection sample in XYZ within spawn bounds, with a safety floor above the table.
+            positions = []
+            tries = 0
+            while len(positions) < len(paths) and tries < 2000:
+                tries += 1
+                x = random.uniform(bmin[0], bmax[0])
+                y = random.uniform(bmin[1], bmax[1])
+                z = random.uniform(z_min_safe, float(bmax[2]))
+                # Keep objects slightly away from the robot base (Origin1 frame) to reduce near-singularity grasps.
+                try:
+                    min_robot_dist = float(getattr(args, "spawn_min_robot_dist", 0.0))
+                    if min_robot_dist > 1e-6 and math.hypot(float(x), float(y)) < min_robot_dist:
+                        continue
+                except Exception:
+                    pass
+                cand = (x, y, z)
+                ok = True
             for p in positions:
                 dx = cand[0] - p[0]
                 dy = cand[1] - p[1]
-                dz = cand[2] - p[2]
-                if math.sqrt(dx * dx + dy * dy + dz * dz) < min_dist:
-                    ok = False
-                    break
-            if ok:
-                positions.append(cand)
+                # Enforce spacing on the tabletop (XY). Z is intentionally ignored because we often
+                # spawn above the table and let objects fall/settle.
+                if math.hypot(dx, dy) < min_dist:
+                        ok = False
+                        break
+                if ok:
+                    positions.append(cand)
 
-        if len(positions) != len(paths):
-            # Fallback: allow overlaps rather than failing.
-            positions = [
-                (
-                    random.uniform(bmin[0], bmax[0]),
-                    random.uniform(bmin[1], bmax[1]),
-                    random.uniform(z_min_safe, float(bmax[2])),
-                )
-                for _ in paths
-            ]
+            if len(positions) != len(paths):
+                # Fallback: allow overlaps rather than failing.
+                positions = [
+                    (
+                        random.uniform(bmin[0], bmax[0]),
+                        random.uniform(bmin[1], bmax[1]),
+                        random.uniform(z_min_safe, float(bmax[2])),
+                    )
+                    for _ in paths
+                ]
+
+            # Random yaw per object to diversify orientation.
+            yaws = [random.uniform(-math.pi, math.pi) for _ in paths]
 
         sim_view = SimulationManager.get_physics_sim_view()
         # Convert parent-relative spawn coordinates into world coordinates using the scene origin.
@@ -609,7 +801,7 @@ def run(args: argparse.Namespace) -> int:
         except Exception:
             origin0 = None
 
-        for prim_path, pos in zip(paths, positions):
+        for prim_path, pos, yaw in zip(paths, positions, yaws):
             try:
                 rb_path = str(prim_path)
                 try:
@@ -635,7 +827,6 @@ def run(args: argparse.Namespace) -> int:
                     rb_path = str(prim_path)
 
                 rb_view = sim_view.create_rigid_body_view(str(rb_path))
-                yaw = random.uniform(-math.pi, math.pi)
                 qw, qx, qy, qz = _yaw_quat_wxyz(yaw)
                 # RigidBodyView transform format: [x,y,z,qx,qy,qz,qw]
                 px, py, pz = float(pos[0]), float(pos[1]), float(pos[2])
@@ -653,6 +844,7 @@ def run(args: argparse.Namespace) -> int:
             except Exception:
                 # Best-effort: skip failures (keeps episode alive)
                 continue
+        return list(zip(positions, yaws))
 
     # Camera sensor for image capture (same pattern as vla_v0)
     camera_sensor = None
@@ -799,9 +991,14 @@ def run(args: argparse.Namespace) -> int:
         )
 
         dt_local = float(sim.get_physics_dt())
+        # Ensure waypoint tolerance is not larger than the close gate; otherwise we can end up
+        # "finishing" the last waypoint while still being too far to close, causing a hover loop.
+        _close_gate_m = float(getattr(args, "close_if_within_m", 0.005))
+        _wp_tol_m = float(getattr(args, "tolerance", 0.005))
+        _wp_tol_m = float(min(_wp_tol_m, _close_gate_m))
         wp = WaypointFollowerInput(
             step_pos_m=float(ctrl_cfg.linear_speed_mps) * dt_local,
-            tol_m=float(getattr(args, "tolerance", 0.005)),
+            tol_m=float(_wp_tol_m),
             max_steps_per_waypoint=int(getattr(args, "wp_max_steps_per_waypoint", 2400)),
             stagnation_steps=int(getattr(args, "wp_stagnation_steps", 10**9)),
             stagnation_eps_m=float(getattr(args, "wp_stagnation_eps_m", 5e-4)),
@@ -1015,6 +1212,9 @@ def run(args: argparse.Namespace) -> int:
         # when multiple objects exist.
         prev_target_prim: str | None = None
         
+        # Keep a per-cycle object layout so episodes 0..N-1 share poses, then we reshuffle.
+        cycle_object_poses: Optional[list[tuple[tuple[float, float, float], float]]] = None
+
         for ep in range(num_episodes):
             if not simulation_app.is_running():
                 print(f"[VLA_V1][EP] Simulation stopped, ending at episode {ep}/{num_episodes}")
@@ -1052,12 +1252,23 @@ def run(args: argparse.Namespace) -> int:
                     except Exception:
                         pass
 
-                # Re-randomize object poses each episode (no destroy/recreate).
+                # Reset object poses each episode, but only *generate new random poses* every N episodes.
                 do_respawn = bool(getattr(args, "respawn_each_episode", False)) or (
                     control_mode == "planner" and (not bool(getattr(args, "no_respawn_each_episode", False)))
                 )
                 if do_respawn:
-                    _rerandomize_object_poses(spawned_paths)
+                    # Default behavior in planner mode: respawn once per full target cycle (num objects).
+                    # This keeps objects fixed while we attempt each object once, then reshuffles.
+                    respawn_every = 1 if bool(getattr(args, "respawn_each_episode", False)) else int(
+                        getattr(args, "respawn_every_n_episodes", 0)
+                    )
+                    if respawn_every <= 0:
+                        respawn_every = max(1, int(len(spawned_paths)))
+                    regenerate = (cycle_object_poses is None) or ((int(ep) % int(respawn_every)) == 0)
+                    if regenerate:
+                        cycle_object_poses = _rerandomize_object_poses(spawned_paths)
+                    else:
+                        _rerandomize_object_poses(spawned_paths, poses=cycle_object_poses)
 
                 # HARD reset controller + follower per episode to avoid leftover impulses after sim.reset()
                 try:
@@ -1095,6 +1306,15 @@ def run(args: argparse.Namespace) -> int:
                 except Exception:
                     pass
 
+                # IMPORTANT: recreate the object tracker per episode.
+                # The underlying PhysX rigid-body views can become stale across `sim.reset()`, which
+                # breaks lift success detection (target_z stays constant after episode 0).
+                try:
+                    tracker = ObjectsTracker(prim_paths=spawned_paths)
+                except Exception:
+                    # Keep the previous tracker as a fallback.
+                    pass
+
                 obj_z_by_leaf: dict[str, float] = {}
                 try:
                     for o in tracker.snapshot():
@@ -1104,13 +1324,32 @@ def run(args: argparse.Namespace) -> int:
                             continue
                 except Exception:
                     obj_z_by_leaf = {}
+                # Select target once per episode.
+                _tgt = _select_episode_target_prim(ep, object_z_by_leaf=obj_z_by_leaf, prev_target_prim=prev_target_prim)
+                # Episode-level language command for VLA training (stored once per episode).
+                lang_cmd, lang_meta = ("", {})
+                try:
+                    if _tgt is not None:
+                        lang_cmd, lang_meta = _make_language_command(ep_idx=int(ep), target_prim=str(_tgt))
+                except Exception:
+                    lang_cmd, lang_meta = ("", {})
+
+                # Baseline Z for success detection (more robust than relying on table_z alone).
+                z0 = None
+                try:
+                    if _tgt is not None:
+                        leaf = str(_tgt).split("/")[-1]
+                        z0 = obj_z_by_leaf.get(str(leaf), None)
+                except Exception:
+                    z0 = None
+
                 vla_planner_state.update(
                     {
                         "stage": "init_open",
-                        # Pick a single target ONCE per episode (do not re-select per tick).
-                            "target_prim": _select_episode_target_prim(
-                                ep, object_z_by_leaf=obj_z_by_leaf, prev_target_prim=prev_target_prim
-                            ),
+                        "target_prim": _tgt,
+                        "target_z0_w": z0,
+                        "language_command": lang_cmd,
+                        "language_command_meta": lang_meta,
                         "lift_pt": None,
                         "approach_goal_b": None,
                         "grasp_goal_b": None,
@@ -1123,6 +1362,8 @@ def run(args: argparse.Namespace) -> int:
                         # (because `steps - last_plan_step` stays negative and thus < cooldown).
                         "last_plan_step": -10**9,
                         "hold_after_close_left": int(getattr(args, "hold_after_close_steps", 30)),
+                        "post_lift_hold_left": int(getattr(args, "post_lift_hold_steps", 30)),
+                        "lift_success_streak": 0,
                         "open_queued": False,
                         "close_queued": False,
                         "lift_queued": False,
@@ -1132,6 +1373,28 @@ def run(args: argparse.Namespace) -> int:
                         "approach_start_step": None,
                     }
                 )
+
+                # Persist the episode instruction in the episode folder for easy dataset building.
+                try:
+                    if lang_cmd:
+                        import json as _json
+                        from datetime import datetime as _dt
+
+                        (session_logger.root / "instruction.json").write_text(
+                            _json.dumps(
+                                {
+                                    "episode_idx": int(ep),
+                                    "target_prim": str(_tgt),
+                                    "target_label": _prim_label(str(_tgt or "")),
+                                    "language_command": str(lang_cmd),
+                                    "language_command_meta": lang_meta,
+                                    "created_at": _dt.now().isoformat(timespec="seconds"),
+                                },
+                                indent=2,
+                            )
+                        )
+                except Exception:
+                    pass
                 # Update for next episode
                 try:
                     prev_target_prim = str(vla_planner_state.get("target_prim", "") or "") or None
@@ -1158,6 +1421,8 @@ def run(args: argparse.Namespace) -> int:
                         "num_objects": int(len(spawned_paths)),
                         "target_prim": str(vla_planner_state.get("target_prim", None)),
                         "target_label": _prim_label(str(vla_planner_state.get("target_prim", ""))),
+                        "language_command": str(vla_planner_state.get("language_command", "")),
+                        "language_command_meta": vla_planner_state.get("language_command_meta", {}),
                     },
                 )
 
@@ -1678,26 +1943,115 @@ def run(args: argparse.Namespace) -> int:
                                     wp.set_waypoints_b([(float(lift_pt[0]), float(lift_pt[1]), float(lift_pt[2]))])
                                     vla_planner_state["lift_queued"] = True
 
+                                # Early-success: if the target object is already lifted enough while we are
+                                # still trying to reach/hold the lift waypoint, end the episode immediately.
+                                # This prevents long "hover in air then drop" failures where we only evaluate
+                                # success after the waypoint follower times out.
+                                try:
+                                    if vla_planner_state.get("lift_queued", False):
+                                        stride = max(1, int(getattr(args, "lift_success_check_stride", 5)))
+                                        if (int(steps) % stride) == 0:
+                                            target_prim = str(vla_planner_state.get("target_prim", ""))
+                                            z = _target_z_from_tracker(target_prim) if target_prim else None
+                                            z0 = vla_planner_state.get("target_z0_w", None)
+                                            thresh = float(getattr(args, "lift_success_min_dz_m", 0.06))
+                                            dz_from_start = None
+                                            dz_table = None
+                                            lifted = False
+                                            if z is not None:
+                                                try:
+                                                    dz_table = float(z) - float(_table_z())
+                                                except Exception:
+                                                    dz_table = None
+                                                if z0 is not None:
+                                                    try:
+                                                        dz_from_start = float(z) - float(z0)
+                                                    except Exception:
+                                                        dz_from_start = None
+                                                # Prefer delta-from-start when available (robust to object origin conventions).
+                                                if dz_from_start is not None:
+                                                    lifted = bool(dz_from_start >= thresh)
+                                                elif dz_table is not None:
+                                                    lifted = bool(dz_table >= thresh)
+
+                                            if lifted:
+                                                vla_planner_state["lift_success_streak"] = int(vla_planner_state.get("lift_success_streak", 0)) + 1
+                                            else:
+                                                vla_planner_state["lift_success_streak"] = 0
+
+                                            confirm = max(1, int(getattr(args, "lift_success_confirm_steps", 10)))
+                                            if int(vla_planner_state.get("lift_success_streak", 0)) >= confirm:
+                                                # Clear motion immediately and end episode.
+                                                try:
+                                                    wp.set_waypoints_b([])
+                                                except Exception:
+                                                    pass
+                                                session_logger.log_event(
+                                                    "grasp_result",
+                                                    {
+                                                        "episode_idx": int(ep),
+                                                        "ok": True,
+                                                        "target_z": z,
+                                                        "dz_above_table": dz_table,
+                                                        "dz_from_start": dz_from_start,
+                                                        "lift_success_thresh_m": float(thresh),
+                                                        "reason": "early_lift_success",
+                                                    },
+                                                )
+                                                # Also end the LIFT action cleanly for logs.
+                                                session_logger.log_event(
+                                                    "action_end",
+                                                    {"action": "LIFT", "episode_idx": int(ep), "early_success": True},
+                                                )
+                                                vla_planner_state["stage"] = "done"
+                                                # Skip the rest of lift handling this step.
+                                                continue
+                                except Exception:
+                                    pass
+
                                 if (
                                     lift_pt is not None
                                     and vla_planner_state.get("lift_queued", False)
                                     and len(getattr(wp, "_waypoints_b", [])) == 0
                                 ):
                                     session_logger.log_event("action_end", {"action": "LIFT", "episode_idx": int(ep)})
-                                    # Check success (target object lifted above table plane)
+                                    # Post-lift hold: let the object catch up before we evaluate success.
+                                    vla_planner_state["stage"] = "post_lift_hold"
+                                    vla_planner_state["post_lift_hold_left"] = int(getattr(args, "post_lift_hold_steps", 30))
+
+                            if str(vla_planner_state.get("stage", "")) == "post_lift_hold":
+                                hold_left = int(vla_planner_state.get("post_lift_hold_left", 0))
+                                controller.set_mode("translate")
+                                if hold_left > 0:
+                                    vla_planner_state["post_lift_hold_left"] = hold_left - 1
+                                else:
+                                    # Check success (target object lifted above table plane and/or above its initial height)
                                     target_prim = str(vla_planner_state.get("target_prim", ""))
                                     z = _target_z_from_tracker(target_prim) if target_prim else None
-                                    dz = None
+                                    z0 = vla_planner_state.get("target_z0_w", None)
+                                    dz_table = None
+                                    dz_from_start = None
                                     ok = False
+                                    thresh = float(getattr(args, "lift_success_min_dz_m", 0.06))
                                     try:
                                         if z is not None:
-                                            dz = float(z) - float(_table_z())
-                                            ok = dz >= float(getattr(args, "lift_success_min_dz_m", 0.06))
+                                            dz_table = float(z) - float(_table_z())
+                                            ok = bool(dz_table >= thresh)
+                                            if z0 is not None:
+                                                dz_from_start = float(z) - float(z0)
+                                                ok = bool(ok or (dz_from_start >= thresh))
                                     except Exception:
                                         ok = False
                                     session_logger.log_event(
                                         "grasp_result",
-                                        {"episode_idx": int(ep), "ok": bool(ok), "target_z": z, "dz_above_table": dz},
+                                        {
+                                            "episode_idx": int(ep),
+                                            "ok": bool(ok),
+                                            "target_z": z,
+                                            "dz_above_table": dz_table,
+                                            "dz_from_start": dz_from_start,
+                                            "lift_success_thresh_m": float(thresh),
+                                        },
                                     )
                                     if ok:
                                         vla_planner_state["stage"] = "done"
