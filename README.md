@@ -18,6 +18,12 @@ cd <repo-root>
 - `environments/`: Scene construction (`reach_to_grasp`) and object loading utilities.
 - `assist/`: Logging utilities and “assist” orchestration components (currently used mainly for logging/tracking).
 
+## Copilot demo (IsaacSim)
+
+- Interactive (oracle backend): `python -m copilot_demo.demo_isaacsim --backend oracle --planner curobo --enable_cameras`
+- HF backend example: `python -m copilot_demo.demo_isaacsim --backend hf --model_name Qwen/Qwen2.5-7B-Instruct --adapter_path grasp-copilot/models/adapter --planner curobo`
+- Headless tests: `pytest -q` (set `ISAACSIM_AVAILABLE=1` to run the opt-in IsaacSim check)
+
 ## Prerequisites
 
 - **Isaac Sim + Isaac Lab**: `kinova-isaac` imports `isaaclab.*` and expects to run under an Isaac Sim runtime.
@@ -170,4 +176,3 @@ Common arguments for tuning the data collection process:
 
 - **Keyboard teleop requires GUI**: run without `--headless` to use keyboard input.
 - **Object spawning depends on asset availability**: if spawning fails, rerun with `--no-objects` to isolate issues.
-
