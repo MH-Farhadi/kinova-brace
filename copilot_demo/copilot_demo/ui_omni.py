@@ -36,7 +36,8 @@ class AssistUI:
         import omni.ui as ui  # type: ignore
 
         self._ui = ui
-        self.window = ui.Window("Grasp Copilot", width=380, height=520)
+        # Main control window (user-facing).
+        self.window = ui.Window("Grasp Copilot", width=380, height=340)
         with self.window.frame:
             with ui.VStack(spacing=6, style={"margin": 10}):
                 self.status_label = ui.Label("Status: idle", word_wrap=True)
@@ -52,21 +53,24 @@ class AssistUI:
                     ui.Button("Ask assistance", height=32, clicked_fn=self._on_ask)
                     ui.Button("Reset", height=32, clicked_fn=self._on_reset)
 
-                ui.Label("Log")
-                self._log_frame = ui.ScrollingFrame(height=180, style={"background_color": 0x151515ff})
-                with self._log_frame:
-                    self._log_stack = ui.VStack(spacing=2, style={"margin": 4})
-
                 ui.Label("Choices")
-                self._choice_stack = ui.VStack(spacing=4)
+                # Keep choices as plain buttons (no scrolling). To avoid stale “black line”
+                # artifacts when rebuilding, we recreate the container stack on each update.
+                self._choice_frame = ui.Frame(height=0)
+                with self._choice_frame:
+                    self._choice_stack = ui.VStack(spacing=4, style={"margin": 4})
 
-                ui.Label("Workspace grid (A1..C3)")
-                with ui.VStack(spacing=2, style={"margin": 4}):
-                    for row in ("A", "B", "C"):
-                        with ui.HStack(spacing=4):
-                            for col in ("1", "2", "3"):
-                                ui.Label(f"{row}{col}", width=40, alignment=ui.Alignment.CENTER)
+                # Optional workspace hint (no grid UI; keep only a compact bounds hint).
                 self._bounds_label = ui.Label("", word_wrap=True)
+
+        # Separate log window (debug/engineer-facing).
+        self.log_window = ui.Window("Grasp Copilot Logs", width=520, height=420)
+        with self.log_window.frame:
+            with ui.VStack(spacing=6, style={"margin": 10}):
+                ui.Label("Log")
+                self._log_frame = ui.ScrollingFrame(height=360, style={"background_color": 0x151515ff})
+                with self._log_frame:
+                    self._log_stack = ui.VStack(spacing=2, style={"margin": 6})
 
     def set_status(self, text: str) -> None:
         self._log.append(text)
@@ -95,14 +99,38 @@ class AssistUI:
         self._choices = choices
         if not self.enabled or self._ui is None:
             return
-        # Rebuild choice buttons
+        ui = self._ui
+        # Destroy any previous choice widgets.
         for w in list(self._choice_widgets):
             try:
                 w.destroy()  # type: ignore[attr-defined]
             except Exception:
                 pass
         self._choice_widgets = []
+
+        # Recreate the container stack to avoid visual artifacts in some omni.ui builds.
+        try:
+            self._choice_stack.destroy()  # type: ignore[attr-defined]
+        except Exception:
+            pass
+        with self._choice_frame:
+            self._choice_stack = ui.VStack(spacing=4, style={"margin": 4})
+
+        try:
+            self._choice_stack.visible = False
+            self._choice_stack.visible = True
+        except Exception:
+            pass
         with self._choice_stack:
             for ch in choices:
-                btn = self._ui.Button(ch, clicked_fn=lambda cc=ch: self._on_choice(cc))
+                btn = ui.Button(
+                    ch,
+                    height=28,
+                    clicked_fn=lambda cc=ch: self._on_choice(cc),
+                    style={
+                        "margin": 2,
+                        # Best-effort: keep borders subtle to avoid “black line” artifacts.
+                        "border_width": 1,
+                    },
+                )
                 self._choice_widgets.append(btn)
