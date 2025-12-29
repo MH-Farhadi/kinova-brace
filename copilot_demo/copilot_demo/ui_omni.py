@@ -24,6 +24,9 @@ class AssistUI:
         self._on_mode_change = on_mode_change
         self._mode = "translation"
         self._choices: Sequence[str] = []
+        # Track created omni.ui widgets explicitly since some omni.ui container
+        # types (e.g. VStack) don't expose a stable `.children` API across versions.
+        self._choice_widgets: List[object] = []
         self._log: List[str] = []
         self._ui = None
         if enabled:
@@ -93,7 +96,13 @@ class AssistUI:
         if not self.enabled or self._ui is None:
             return
         # Rebuild choice buttons
-        for child in list(self._choice_stack.children):
-            child.destroy()
-        for ch in choices:
-            self._ui.Button(ch, clicked_fn=lambda cc=ch: self._on_choice(cc))
+        for w in list(self._choice_widgets):
+            try:
+                w.destroy()  # type: ignore[attr-defined]
+            except Exception:
+                pass
+        self._choice_widgets = []
+        with self._choice_stack:
+            for ch in choices:
+                btn = self._ui.Button(ch, clicked_fn=lambda cc=ch: self._on_choice(cc))
+                self._choice_widgets.append(btn)
