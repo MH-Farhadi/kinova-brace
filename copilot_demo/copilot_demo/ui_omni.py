@@ -35,14 +35,16 @@ class AssistUI:
         self._ui = ui
         self.window = ui.Window("Grasp Copilot", width=380, height=520)
         with self.window.frame:
-        with ui.VStack(spacing=6, style={"margin": 10}):
-            self.status_label = ui.Label("Status: idle", word_wrap=True)
-            with ui.HStack(height=28):
-                ui.Label("Mode:", width=60)
-                self._mode_buttons = {}
+            with ui.VStack(spacing=6, style={"margin": 10}):
+                self.status_label = ui.Label("Status: idle", word_wrap=True)
+
+                with ui.HStack(height=28):
+                    ui.Label("Mode:", width=60)
+                    self._mode_buttons = {}
                     for m in ("translation", "rotation", "gripper"):
                         btn = ui.Button(m, width=90, clicked_fn=lambda mm=m: self._set_mode(mm))
                         self._mode_buttons[m] = btn
+
                 with ui.HStack(spacing=8):
                     ui.Button("Ask assistance", height=32, clicked_fn=self._on_ask)
                     ui.Button("Reset", height=32, clicked_fn=self._on_reset)

@@ -14,6 +14,11 @@ from isaaclab.app import AppLauncher
 ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
+# Ensure this package is importable when running the file directly:
+#   python kinova-isaac/copilot_demo/copilot_demo/demo_isaacsim.py
+COPILOT_ROOT = ROOT / "copilot_demo"
+if COPILOT_ROOT.exists() and str(COPILOT_ROOT) not in sys.path:
+    sys.path.insert(0, str(COPILOT_ROOT))
 GP_ROOT = ROOT.parent / "grasp-copilot"
 if GP_ROOT.exists() and str(GP_ROOT) not in sys.path:
     sys.path.insert(0, str(GP_ROOT))
@@ -28,9 +33,9 @@ from data_collection.core.input_mux import CommandMuxInputProvider
 from data_collection.core.objects import ObjectsTracker
 from data_generator.oracle import validate_tool_call  # type: ignore
 
-from .backends import HFBackend, OracleBackend, _strip_choice_label
-from .extractor import ExtractorConfig, InputExtractor
-from .executor import ActionExecutor, ExecutorConfig
+from copilot_demo.backends import HFBackend, OracleBackend, _strip_choice_label
+from copilot_demo.extractor import ExtractorConfig, InputExtractor
+from copilot_demo.executor import ActionExecutor, ExecutorConfig
 
 
 def _choice_to_user_content(choice_str: str) -> str:
@@ -215,7 +220,9 @@ def parse_args() -> argparse.Namespace:
     ap.add_argument("--merged_model_path", type=str, default=None)
     ap.add_argument("--use_4bit", action=argparse.BooleanOptionalAction, default=False)
     ap.add_argument("--planner", type=str, default="curobo")
-    ap.add_argument("--enable_cameras", action=argparse.BooleanOptionalAction, default=False)
+    # NOTE: `AppLauncher.add_app_launcher_args(ap)` already defines:
+    #   --headless, --enable_cameras, --device
+    # Do not add them here, otherwise argparse raises duplicate-field errors.
     ap.add_argument("--candidate_max_dist", type=int, default=2)
     ap.add_argument("--workspace_min_xyz", type=float, nargs=3, default=None)
     ap.add_argument("--workspace_max_xyz", type=float, nargs=3, default=None)
@@ -223,8 +230,6 @@ def parse_args() -> argparse.Namespace:
     ap.add_argument("--grasp_depth_m", type=float, default=0.03)
     ap.add_argument("--lift_height_m", type=float, default=0.08)
     ap.add_argument("--align_steps", type=int, default=45)
-    ap.add_argument("--headless", action=argparse.BooleanOptionalAction, default=False)
-    ap.add_argument("--device", type=str, default="cuda:0")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--num_objects", type=int, default=4)
     ap.add_argument("--spawn_min", type=float, nargs=3, default=[0.2, -0.3, 0.9])
@@ -430,7 +435,7 @@ def main() -> None:
     # importing omni.ui in non-Kit contexts.
     AssistUI = None
     if not bool(args.headless):
-        from .ui_omni import AssistUI as _AssistUI  # noqa: E402
+        from copilot_demo.ui_omni import AssistUI as _AssistUI  # noqa: E402
 
         AssistUI = _AssistUI
 
