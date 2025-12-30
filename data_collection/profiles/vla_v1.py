@@ -13,10 +13,27 @@ from data_collection.profiles.spec import ProfileSpec
 def add_cli_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--env", type=str, default="reach_to_grasp_VLA", choices=sorted(get_envs().keys()))
     parser.add_argument("--logs-root", type=str, default="logs/data_collection")
-    parser.add_argument("--log-rate-hz", type=int, default=10)
+    # For VLA training, a 5Hz policy/control rate is a good default trade-off between
+    # responsiveness and dataset size (and matches common OpenVLA-style datasets).
+    parser.add_argument("--log-rate-hz", type=int, default=5)
     parser.add_argument("--duration-s", type=float, default=30.0)
     parser.add_argument("--control", type=str, default="keyboard", choices=["keyboard", "idle", "planner"])
     parser.add_argument("--image-format", type=str, default="png", choices=["png", "jpg"], help="Image format for saving")
+    # Domain randomization (toggleable; off by default). Intended to improve sim2real robustness.
+    # Applied once per episode in planner mode (and once at start in non-planner modes).
+    parser.add_argument("--domain-rand", action="store_true", help="Enable domain randomization (camera + lighting). Default: off.")
+    parser.add_argument("--domain-rand-seed", type=int, default=None, help="Optional base RNG seed for domain randomization.")
+    # Camera: jitter around the configured DEFAULT_TOP_DOWN_CAMERA pose (meters/degrees).
+    parser.add_argument("--domain-rand-camera-xy-m", type=float, default=0.02, help="Uniform XY jitter (m) for top-down camera.")
+    parser.add_argument("--domain-rand-camera-z-m", type=float, default=0.10, help="Uniform Z jitter (m) for top-down camera height.")
+    parser.add_argument("--domain-rand-camera-yaw-deg", type=float, default=20.0, help="Uniform yaw jitter (deg) for top-down camera.")
+    parser.add_argument("--domain-rand-camera-pitch-deg", type=float, default=0.0, help="Uniform pitch jitter (deg) for top-down camera (tilt).")
+    parser.add_argument("--domain-rand-camera-roll-deg", type=float, default=0.0, help="Uniform roll jitter (deg) for top-down camera (tilt).")
+    parser.add_argument("--domain-rand-camera-fov-deg", type=float, default=5.0, help="Uniform FOV jitter (deg) around default camera FOV.")
+    # Lighting: jitter dome light intensity and color.
+    parser.add_argument("--domain-rand-light-intensity-mult-min", type=float, default=0.5, help="Min multiplier for dome light intensity.")
+    parser.add_argument("--domain-rand-light-intensity-mult-max", type=float, default=1.5, help="Max multiplier for dome light intensity.")
+    parser.add_argument("--domain-rand-light-color-jitter", type=float, default=0.15, help="Per-channel RGB jitter for dome light color (0..1).")
     # vla_v1: nudge default spawn region slightly away from the robot to reduce "too-close" grasps.
     # (These args are registered by scripts/cli.add_demo_cli_args before this profile hook runs.)
     try:
@@ -396,6 +413,166 @@ def run(args: argparse.Namespace) -> int:
         create_topdown_camera(DEFAULT_TOP_DOWN_CAMERA)
         print(f"[VLA_V1] Top-down camera created at: {DEFAULT_TOP_DOWN_CAMERA.prim_path}")
 
+    # -----------------------------
+    # Domain randomization helpers
+    # -----------------------------
+    domain_rand_enabled = bool(getattr(args, "domain_rand", False))
+    # Cache defaults so each episode randomizes around a stable baseline (no drift).
+    _dr_base_cam_pos = None
+    _dr_base_cam_fov = None
+    _dr_cam_prim_path = None
+    try:
+        if DEFAULT_TOP_DOWN_CAMERA is not None:
+            _dr_base_cam_pos = tuple(float(v) for v in getattr(DEFAULT_TOP_DOWN_CAMERA, "position", (0.4, 0.0, 4.0)))
+            _dr_base_cam_fov = float(getattr(DEFAULT_TOP_DOWN_CAMERA, "fov", 65.0))
+            _dr_cam_prim_path = str(getattr(DEFAULT_TOP_DOWN_CAMERA, "prim_path", ""))
+    except Exception:
+        _dr_base_cam_pos = None
+        _dr_base_cam_fov = None
+        _dr_cam_prim_path = None
+
+    _dr_light_prim_path = "/World/Light"
+    _dr_seed_base = None
+    try:
+        # Use user-provided seed when available; otherwise sample once per run.
+        if getattr(args, "domain_rand_seed", None) is not None:
+            _dr_seed_base = int(getattr(args, "domain_rand_seed"))
+        else:
+            _dr_seed_base = int(time.time() * 1000) & 0x7FFFFFFF
+    except Exception:
+        _dr_seed_base = 0
+
+    def _apply_domain_randomization(*, ep_idx: int, logger: Optional["SessionLogWriter"] = None) -> Optional[dict]:
+        """Apply domain randomization (camera + lighting) once per episode.
+
+        Off by default; enabled via --domain-rand.
+        Returns the sampled parameters dict when applied.
+        """
+        if not domain_rand_enabled:
+            return None
+        try:
+            import random
+            import importlib
+
+            omni_usd = importlib.import_module("omni.usd")
+            UsdGeom = importlib.import_module("pxr.UsdGeom")
+            UsdLux = importlib.import_module("pxr.UsdLux")
+            Gf = importlib.import_module("pxr.Gf")
+            stage = omni_usd.get_context().get_stage()
+        except Exception:
+            return None
+
+        seed = int((_dr_seed_base or 0) + int(ep_idx))
+        rng = random.Random(seed)
+
+        out: dict = {"enabled": True, "seed": int(seed)}
+
+        # --- Lighting: dome light intensity + color
+        try:
+            prim = stage.GetPrimAtPath(str(_dr_light_prim_path))
+            if prim.IsValid():
+                dome = UsdLux.DomeLight(prim)
+                # Read current as baseline if possible
+                base_int = None
+                base_col = None
+                try:
+                    base_int = float(dome.GetIntensityAttr().Get())
+                except Exception:
+                    base_int = 2000.0
+                try:
+                    c = dome.GetColorAttr().Get()
+                    base_col = (float(c[0]), float(c[1]), float(c[2]))
+                except Exception:
+                    base_col = (0.75, 0.75, 0.75)
+
+                mult_min = float(getattr(args, "domain_rand_light_intensity_mult_min", 0.5))
+                mult_max = float(getattr(args, "domain_rand_light_intensity_mult_max", 1.5))
+                mult = float(rng.uniform(min(mult_min, mult_max), max(mult_min, mult_max)))
+                intensity = float(max(0.0, base_int * mult))
+
+                jitter = float(getattr(args, "domain_rand_light_color_jitter", 0.15))
+                def _clamp01(x: float) -> float:
+                    return float(max(0.0, min(1.0, x)))
+                color = (
+                    _clamp01(base_col[0] + rng.uniform(-jitter, jitter)),
+                    _clamp01(base_col[1] + rng.uniform(-jitter, jitter)),
+                    _clamp01(base_col[2] + rng.uniform(-jitter, jitter)),
+                )
+
+                dome.GetIntensityAttr().Set(float(intensity))
+                dome.GetColorAttr().Set(Gf.Vec3f(float(color[0]), float(color[1]), float(color[2])))
+                out["light"] = {
+                    "prim_path": str(_dr_light_prim_path),
+                    "intensity": float(intensity),
+                    "intensity_mult": float(mult),
+                    "color_rgb": [float(color[0]), float(color[1]), float(color[2])],
+                }
+        except Exception:
+            pass
+
+        # --- Camera: pose + yaw + (optional) tilt + FOV
+        try:
+            if enable_cameras and _dr_cam_prim_path and _dr_base_cam_pos is not None:
+                cam_prim = stage.GetPrimAtPath(str(_dr_cam_prim_path))
+                if cam_prim.IsValid():
+                    # Pose jitter
+                    xy = float(getattr(args, "domain_rand_camera_xy_m", 0.02))
+                    z_j = float(getattr(args, "domain_rand_camera_z_m", 0.10))
+                    dx = float(rng.uniform(-xy, xy))
+                    dy = float(rng.uniform(-xy, xy))
+                    dz = float(rng.uniform(-z_j, z_j))
+                    x0, y0, z0 = _dr_base_cam_pos
+                    pos = (float(x0 + dx), float(y0 + dy), float(max(0.5, z0 + dz)))
+
+                    # Orientation jitter (degrees)
+                    yaw_rng = float(getattr(args, "domain_rand_camera_yaw_deg", 20.0))
+                    pitch_rng = float(getattr(args, "domain_rand_camera_pitch_deg", 0.0))
+                    roll_rng = float(getattr(args, "domain_rand_camera_roll_deg", 0.0))
+                    yaw = float(rng.uniform(-yaw_rng, yaw_rng))
+                    pitch = float(rng.uniform(-pitch_rng, pitch_rng)) if pitch_rng > 0 else 0.0
+                    roll = float(rng.uniform(-roll_rng, roll_rng)) if roll_rng > 0 else 0.0
+
+                    xform = UsdGeom.Xformable(cam_prim)
+                    xform.ClearXformOpOrder()
+                    translate_op = xform.AddTranslateOp(UsdGeom.XformOp.PrecisionDouble)
+                    rotate_op = xform.AddRotateXYZOp(UsdGeom.XformOp.PrecisionFloat)
+                    translate_op.Set(Gf.Vec3d(float(pos[0]), float(pos[1]), float(pos[2])))
+                    rotate_op.Set(Gf.Vec3f(float(roll), float(pitch), float(yaw)))
+
+                    # FOV jitter via focal length
+                    base_fov = float(_dr_base_cam_fov) if _dr_base_cam_fov is not None else 65.0
+                    fov_j = float(getattr(args, "domain_rand_camera_fov_deg", 5.0))
+                    fov = float(base_fov + rng.uniform(-fov_j, fov_j))
+                    fov = float(max(15.0, min(120.0, fov)))
+                    try:
+                        cam = UsdGeom.Camera(cam_prim)
+                        import numpy as np  # noqa: F401
+                        # Match environments/utils/camera/topdown.py convention.
+                        import math as _math
+
+                        sensor_size_mm = 36.0
+                        focal_length_mm = sensor_size_mm / (2.0 * _math.tan(_math.radians(fov) / 2.0))
+                        cam.GetFocalLengthAttr().Set(float(focal_length_mm))
+                    except Exception:
+                        pass
+
+                    out["camera"] = {
+                        "prim_path": str(_dr_cam_prim_path),
+                        "pos_xyz": [float(pos[0]), float(pos[1]), float(pos[2])],
+                        "rpy_deg": [float(roll), float(pitch), float(yaw)],
+                        "fov_deg": float(fov),
+                    }
+        except Exception:
+            pass
+
+        # Log sampled randomization parameters for auditing.
+        try:
+            if logger is not None:
+                logger.log_event("domain_randomization", out)
+        except Exception:
+            pass
+        return out
+
     # Spawn objects (v1 uses helpers so we can respawn per episode)
     spawned_paths: list[str] = []
     id_to_label: Dict[str, str] = {}
@@ -683,6 +860,11 @@ def run(args: argparse.Namespace) -> int:
             return None
         return None
 
+    # Cache for Isaac Sim core prim wrappers used during respawn (box mode).
+    # We use `isaacsim.core.prims.RigidPrim` because it is physics-aware and survives repeated `sim.reset()`
+    # better than raw tensor views in this script.
+    _respawn_rigidprims: dict[str, object] = {}
+
     def _rerandomize_object_poses(
         paths: list[str],
         *,
@@ -719,14 +901,21 @@ def run(args: argparse.Namespace) -> int:
         UsdPhysics = None
         omni_usd = None
         sim_utils = None
+        RigidPrim = None
         try:
             UsdPhysics = importlib.import_module("pxr.UsdPhysics")
             omni_usd = importlib.import_module("omni.usd")
             sim_utils = importlib.import_module("isaaclab.sim")
+            try:
+                # Physics-aware rigid prim wrapper (teleport + velocities) backed by SimulationManager tensor views.
+                RigidPrim = importlib.import_module("isaacsim.core.prims").RigidPrim
+            except Exception:
+                RigidPrim = None
         except Exception:
             UsdPhysics = None
             omni_usd = None
             sim_utils = None
+            RigidPrim = None
 
         # Bounds are in meters relative to parent prim; in this env parent is /World/Origin1.
         # IMPORTANT: keep using the configured Z spawn band (often well above the table) so objects
@@ -767,12 +956,12 @@ def run(args: argparse.Namespace) -> int:
                     pass
                 cand = (x, y, z)
                 ok = True
-            for p in positions:
-                dx = cand[0] - p[0]
-                dy = cand[1] - p[1]
-                # Enforce spacing on the tabletop (XY). Z is intentionally ignored because we often
-                # spawn above the table and let objects fall/settle.
-                if math.hypot(dx, dy) < min_dist:
+                for p in positions:
+                    dx = cand[0] - p[0]
+                    dy = cand[1] - p[1]
+                    # Enforce spacing on the tabletop (XY). Z is intentionally ignored because we often
+                    # spawn above the table and let objects fall/settle.
+                    if math.hypot(dx, dy) < min_dist:
                         ok = False
                         break
                 if ok:
@@ -801,6 +990,62 @@ def run(args: argparse.Namespace) -> int:
         except Exception:
             origin0 = None
 
+        def _teleport_via_rigidprim(
+            *,
+            rb_prim_path: str,
+            pos_xyz: tuple[float, float, float],
+            quat_wxyz: tuple[float, float, float, float],
+        ) -> bool:
+            """Teleport a rigid prim using `isaacsim.core.prims.RigidPrim` (box mode only).
+
+            This does NOT call sim.reset() and does not delete/recreate prims.
+            """
+            if RigidPrim is None:
+                return False
+            try:
+                import numpy as np
+
+                key = str(rb_prim_path)
+                rp = _respawn_rigidprims.get(key)
+                if rp is None:
+                    # reset_xform_properties=False avoids rewriting xformOpOrder on every init.
+                    rp = RigidPrim(prim_paths_expr=str(rb_prim_path), name=f"respawn_{key.split('/')[-1]}", reset_xform_properties=False)
+                    _respawn_rigidprims[key] = rp
+
+                # Ensure physics handles are valid after sim.reset().
+                try:
+                    if hasattr(rp, "initialize"):
+                        rp.initialize()
+                except Exception:
+                    pass
+
+                pos = np.array([[float(pos_xyz[0]), float(pos_xyz[1]), float(pos_xyz[2])]], dtype=np.float32)
+                ori = np.array(
+                    [[float(quat_wxyz[0]), float(quat_wxyz[1]), float(quat_wxyz[2]), float(quat_wxyz[3])]],
+                    dtype=np.float32,
+                )
+
+                # Teleport pose (RigidPrim uses scalar-first quaternions: wxyz).
+                try:
+                    rp.set_world_poses(positions=pos, orientations=ori)
+                except TypeError:
+                    # Some versions accept positional args.
+                    rp.set_world_poses(pos, ori)
+
+                # Zero velocities (GPU-safe): [vx,vy,vz, wx,wy,wz]
+                try:
+                    rp.set_velocities(np.zeros((1, 6), dtype=np.float32))
+                except Exception:
+                    # Best-effort fallback
+                    try:
+                        rp.set_linear_velocities(np.zeros((1, 3), dtype=np.float32))
+                        rp.set_angular_velocities(np.zeros((1, 3), dtype=np.float32))
+                    except Exception:
+                        pass
+                return True
+            except Exception:
+                return False
+
         for prim_path, pos, yaw in zip(paths, positions, yaws):
             try:
                 rb_path = str(prim_path)
@@ -816,7 +1061,10 @@ def run(args: argparse.Namespace) -> int:
                                 rigid_prims = get_all_matching_child_prims(
                                     str(prim_path),
                                     predicate=lambda p: p.HasAPI(UsdPhysics.RigidBodyAPI),  # type: ignore[union-attr]
-                                    traverse_instance_prims=False,
+                                    # IMPORTANT: box spawners and some assets can create instanceable prims;
+                                    # if we don't traverse instance prims, we may fail to find the rigid body
+                                    # and the teleport becomes a no-op.
+                                    traverse_instance_prims=True,
                                 )
                                 if rigid_prims:
                                     try:
@@ -826,7 +1074,49 @@ def run(args: argparse.Namespace) -> int:
                 except Exception:
                     rb_path = str(prim_path)
 
+                # For box mode, prefer physics-aware RigidPrim teleport (more reliable across sim.reset()).
+                try:
+                    if str(getattr(args, "spawn_mode", "usd")) == "box":
+                        qw, qx, qy, qz = _yaw_quat_wxyz(yaw)
+                        px, py, pz = float(pos[0]), float(pos[1]), float(pos[2])
+                        if origin0 is not None and origin0.numel() >= 3:
+                            px += float(origin0[0].item())
+                            py += float(origin0[1].item())
+                            pz += float(origin0[2].item())
+                        if _teleport_via_rigidprim(
+                            rb_prim_path=str(rb_path),
+                            pos_xyz=(float(px), float(py), float(pz)),
+                            quat_wxyz=(float(qw), float(qx), float(qy), float(qz)),
+                        ):
+                            continue
+                except Exception:
+                    pass
+
                 rb_view = sim_view.create_rigid_body_view(str(rb_path))
+                # Resolve a usable rigid-body view:
+                # - Some spawners produce a rigid-body on a child prim or instance proxy.
+                # - Some view expressions can match 0 or >1 bodies; we must handle both.
+                t0 = None
+                try:
+                    if hasattr(rb_view, "get_transforms"):
+                        t0 = rb_view.get_transforms()
+                except Exception:
+                    t0 = None
+                # If empty, try a wildcard match under the root.
+                try:
+                    if t0 is None or (hasattr(t0, "shape") and int(getattr(t0, "shape")[0]) == 0):
+                        rb_view = sim_view.create_rigid_body_view(f"{str(prim_path)}/*")
+                        if hasattr(rb_view, "get_transforms"):
+                            t0 = rb_view.get_transforms()
+                except Exception:
+                    # If we still can't read transforms, skip this object.
+                    t0 = None
+                # If still empty, skip (keeps episode alive).
+                try:
+                    if t0 is not None and hasattr(t0, "shape") and int(getattr(t0, "shape")[0]) == 0:
+                        continue
+                except Exception:
+                    pass
                 qw, qx, qy, qz = _yaw_quat_wxyz(yaw)
                 # RigidBodyView transform format: [x,y,z,qx,qy,qz,qw]
                 px, py, pz = float(pos[0]), float(pos[1]), float(pos[2])
@@ -834,13 +1124,27 @@ def run(args: argparse.Namespace) -> int:
                     px += float(origin0[0].item())
                     py += float(origin0[1].item())
                     pz += float(origin0[2].item())
-                tf = torch.tensor([[px, py, pz, float(qx), float(qy), float(qz), float(qw)]], device=sim.device)
+                # Match the tensor device/shape expected by PhysX view.
+                dev = sim.device
+                n = 1
+                try:
+                    if t0 is not None and hasattr(t0, "device"):
+                        dev = t0.device
+                    if t0 is not None and hasattr(t0, "shape"):
+                        n = int(getattr(t0, "shape")[0])
+                        n = max(1, n)
+                except Exception:
+                    dev = sim.device
+                    n = 1
+                tf = torch.tensor([[px, py, pz, float(qx), float(qy), float(qz), float(qw)]], device=dev)
+                if n != 1:
+                    tf = tf.repeat(int(n), 1)
                 if hasattr(rb_view, "set_transforms"):
                     rb_view.set_transforms(tf)
                 if hasattr(rb_view, "set_linear_velocities"):
-                    rb_view.set_linear_velocities(torch.zeros((1, 3), device=sim.device))
+                    rb_view.set_linear_velocities(torch.zeros((int(n), 3), device=dev))
                 if hasattr(rb_view, "set_angular_velocities"):
-                    rb_view.set_angular_velocities(torch.zeros((1, 3), device=sim.device))
+                    rb_view.set_angular_velocities(torch.zeros((int(n), 3), device=dev))
             except Exception:
                 # Best-effort: skip failures (keeps episode alive)
                 continue
@@ -885,6 +1189,20 @@ def run(args: argparse.Namespace) -> int:
         except Exception as e:
             print(f"[VLA_V1] ERROR: Camera sensor reset failed post sim.reset: {e}")
             camera_sensor = None
+
+    # Apply domain randomization once for non-episode runs (keyboard/idle). Planner mode applies per episode.
+    # This is done after sim.reset so camera/light prims exist and are stable.
+    try:
+        if domain_rand_enabled:
+            _apply_domain_randomization(ep_idx=0, logger=None)
+            # If we moved the camera, best-effort reset the camera sensor so render products refresh.
+            if camera_sensor is not None:
+                try:
+                    camera_sensor.reset()
+                except Exception:
+                    pass
+    except Exception:
+        pass
 
     # Controller
     # Smoother default for planner execution (keyboard teleop can remain snappier).
@@ -1252,6 +1570,16 @@ def run(args: argparse.Namespace) -> int:
                     except Exception:
                         pass
 
+                # IMPORTANT: PhysX views are not reliably populated immediately after `sim.reset()`.
+                # If we try to create rigid-body views and teleport *before* the first post-reset step,
+                # the view can be empty and the respawn becomes a silent no-op (objects never move).
+                # Stepping once here ensures rigid bodies are registered before we respawn/teleport.
+                try:
+                    sim.step(render=False)
+                    robot.update(dt)
+                except Exception:
+                    pass
+
                 # Reset object poses each episode, but only *generate new random poses* every N episodes.
                 do_respawn = bool(getattr(args, "respawn_each_episode", False)) or (
                     control_mode == "planner" and (not bool(getattr(args, "no_respawn_each_episode", False)))
@@ -1266,7 +1594,58 @@ def run(args: argparse.Namespace) -> int:
                         respawn_every = max(1, int(len(spawned_paths)))
                     regenerate = (cycle_object_poses is None) or ((int(ep) % int(respawn_every)) == 0)
                     if regenerate:
-                        cycle_object_poses = _rerandomize_object_poses(spawned_paths)
+                        print(
+                            f"[VLA_V1][RESPAWN] ep={int(ep)} regenerate=True respawn_every={int(respawn_every)} n_objects={len(spawned_paths)}"
+                        )
+                        new_poses = _rerandomize_object_poses(spawned_paths)
+                        if new_poses is not None:
+                            cycle_object_poses = new_poses
+                            # Log/print intended new positions for easy verification.
+                            try:
+                                pose_xy = {
+                                    str(p).split("/")[-1]: [round(float(pos[0]), 4), round(float(pos[1]), 4)]
+                                    for p, (pos, _yaw) in zip(spawned_paths, new_poses)
+                                }
+                                print(f"[VLA_V1][RESPAWN] intended_xy={pose_xy}")
+                                session_logger.log_event(
+                                    "object_respawn",
+                                    {
+                                        "episode_idx": int(ep),
+                                        "respawn_every": int(respawn_every),
+                                        "intended_xy": pose_xy,
+                                    },
+                                )
+                            except Exception:
+                                pass
+                            # Best-effort verification: read back current PhysX poses after one step.
+                            try:
+                                sim.step(render=False)
+                                robot.update(dt)
+                                _trk = ObjectsTracker(prim_paths=spawned_paths)
+                                snap = _trk.snapshot()
+                                actual_xy = {
+                                    str(o.id): [round(float(o.pose.position_m[0]), 4), round(float(o.pose.position_m[1]), 4)]
+                                    for o in snap
+                                }
+                                print(f"[VLA_V1][RESPAWN] actual_xy={actual_xy}")
+                                try:
+                                    session_logger.log_event(
+                                        "object_respawn_actual",
+                                        {
+                                            "episode_idx": int(ep),
+                                            "respawn_every": int(respawn_every),
+                                            "actual_xy": actual_xy,
+                                        },
+                                    )
+                                except Exception:
+                                    pass
+                            except Exception:
+                                pass
+                        else:
+                            print(
+                                "[VLA_V1][RESPAWN][WARN] Respawn requested but teleport failed (no poses applied). "
+                                "Objects may remain at their original locations."
+                            )
                     else:
                         _rerandomize_object_poses(spawned_paths, poses=cycle_object_poses)
 
@@ -1298,6 +1677,17 @@ def run(args: argparse.Namespace) -> int:
                             pass
                         sim.step(render=False)
                         robot.update(dt)
+
+                # Apply domain randomization once per episode (after reset/respawn/settle).
+                try:
+                    _apply_domain_randomization(ep_idx=int(ep), logger=session_logger)
+                    if camera_sensor is not None:
+                        try:
+                            camera_sensor.reset()
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
 
                 # Re-init per-episode follower state to avoid leftover queued waypoints/gripper commands.
                 wp.set_waypoints_b([])
