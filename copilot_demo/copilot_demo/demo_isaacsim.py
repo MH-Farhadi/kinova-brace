@@ -214,6 +214,7 @@ def _apply_oracle_user_reply(
 
 def parse_args() -> argparse.Namespace:
     ap = argparse.ArgumentParser()
+    ap.add_argument("--debug", action="store_true", help="Show debug UI windows (e.g., logs).")
     ap.add_argument("--backend", choices=["oracle", "hf"], default="oracle")
     ap.add_argument("--model_name", type=str, default="Qwen/Qwen2.5-7B-Instruct")
     ap.add_argument("--adapter_path", type=str, default=None)
@@ -538,6 +539,7 @@ def main() -> None:
             on_reset=on_reset,
             on_choice=on_choice,
             on_mode_change=on_mode_change,
+            show_logs=bool(getattr(args, "debug", False)),
             enabled=True,
         )
         try:

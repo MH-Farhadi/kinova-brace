@@ -15,6 +15,7 @@ class AssistUI:
         on_reset: Callable[[], None],
         on_choice: Callable[[str], None],
         on_mode_change: Callable[[str], None],
+        show_logs: bool = False,
         enabled: bool = True,
     ) -> None:
         self.enabled = enabled
@@ -22,6 +23,7 @@ class AssistUI:
         self._on_reset = on_reset
         self._on_choice = on_choice
         self._on_mode_change = on_mode_change
+        self._show_logs = bool(show_logs)
         self._mode = "translation"
         self._choices: Sequence[str] = []
         # Track created omni.ui widgets explicitly since some omni.ui container
@@ -64,13 +66,17 @@ class AssistUI:
                 self._bounds_label = ui.Label("", word_wrap=True)
 
         # Separate log window (debug/engineer-facing).
-        self.log_window = ui.Window("Grasp Copilot Logs", width=520, height=420)
-        with self.log_window.frame:
-            with ui.VStack(spacing=6, style={"margin": 10}):
-                ui.Label("Log")
-                self._log_frame = ui.ScrollingFrame(height=360, style={"background_color": 0x151515ff})
-                with self._log_frame:
-                    self._log_stack = ui.VStack(spacing=2, style={"margin": 6})
+        self.log_window = None
+        self._log_frame = None
+        self._log_stack = None
+        if self._show_logs:
+            self.log_window = ui.Window("Grasp Copilot Logs", width=520, height=420)
+            with self.log_window.frame:
+                with ui.VStack(spacing=6, style={"margin": 10}):
+                    ui.Label("Log")
+                    self._log_frame = ui.ScrollingFrame(height=360, style={"background_color": 0x151515ff})
+                    with self._log_frame:
+                        self._log_stack = ui.VStack(spacing=2, style={"margin": 6})
 
     def set_status(self, text: str) -> None:
         self._log.append(text)
@@ -79,9 +85,10 @@ class AssistUI:
         if not self.enabled or self._ui is None:
             return
         self.status_label.text = f"Status: {text}"
-        # Append to log area
-        with self._log_stack:
-            self._ui.Label(text, word_wrap=True)
+        # Append to log area (if enabled)
+        if self._show_logs and self._log_stack is not None:
+            with self._log_stack:
+                self._ui.Label(text, word_wrap=True)
 
     def set_bounds_hint(self, workspace_min, workspace_max) -> None:
         if not self.enabled or self._ui is None:
