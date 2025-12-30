@@ -350,7 +350,6 @@ def main() -> None:
     controller = CartesianVelocityJogController(ctrl_cfg, num_envs=1, device=str(sim.device))
     controller.reset(robot)
     mode_manager = ModeManager(initial_mode="translate")
-    mode_manager.set_mode_change_callback(lambda mode: controller.set_mode(mode.value))
     controller.set_mode("translate")
 
     mux_input = CommandMuxInputProvider()
@@ -521,11 +520,16 @@ def main() -> None:
             ask_assistance()
 
     def on_mode_change(mode: str) -> None:
-        try:
-            mode_manager.switch_to(mode)
-        except Exception:
-            controller.set_mode(mode)
-        extractor.memory["user_state"] = {"mode": mode}
+        # Accept either UI strings ("translate"/"rotate"/"gripper") or legacy labels.
+        m = str(mode).lower().strip()
+        if m == "translation":
+            m = "translate"
+        if m == "rotation":
+            m = "rotate"
+        if m not in {"translate", "rotate", "gripper"}:
+            return
+        mode_manager.switch_to(m)  # controller + UI will be updated via the mode_manager callback below
+        extractor.memory["user_state"] = {"mode": m}
 
     def on_reset() -> None:
         extractor.reset()
@@ -540,12 +544,30 @@ def main() -> None:
             on_choice=on_choice,
             on_mode_change=on_mode_change,
             show_logs=bool(getattr(args, "debug", False)),
+            initial_mode=str(mode_manager.current_mode.value),
             enabled=True,
         )
         try:
             ui.set_bounds_hint(ctrl_cfg.safety_cfg.workspace_min, ctrl_cfg.safety_cfg.workspace_max)
         except Exception:
             pass
+
+    # Keep controller + UI in sync when mode changes via keyboard callbacks (I/O/P) or UI buttons.
+    def _on_mode_changed(new_mode) -> None:
+        try:
+            controller.set_mode(new_mode.value)
+        except Exception:
+            pass
+        if ui:
+            try:
+                ui.set_mode(new_mode.value)
+            except Exception:
+                pass
+        extractor.memory["user_state"] = {"mode": str(new_mode.value)}
+
+    mode_manager.set_mode_change_callback(_on_mode_changed)
+    # Apply initial mode state to UI/controller.
+    _on_mode_changed(mode_manager.current_mode)
 
     dt = sim.get_physics_dt()
     while simulation_app.is_running():

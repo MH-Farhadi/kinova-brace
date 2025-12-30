@@ -16,6 +16,7 @@ class AssistUI:
         on_choice: Callable[[str], None],
         on_mode_change: Callable[[str], None],
         show_logs: bool = False,
+        initial_mode: str = "translate",
         enabled: bool = True,
     ) -> None:
         self.enabled = enabled
@@ -24,7 +25,9 @@ class AssistUI:
         self._on_choice = on_choice
         self._on_mode_change = on_mode_change
         self._show_logs = bool(show_logs)
-        self._mode = "translation"
+        # Internal mode values match controllers.ModeManager / controller.set_mode:
+        # "translate" | "rotate" | "gripper"
+        self._mode = str(initial_mode).lower().strip() or "translate"
         self._choices: Sequence[str] = []
         # Track created omni.ui widgets explicitly since some omni.ui container
         # types (e.g. VStack) don't expose a stable `.children` API across versions.
@@ -47,9 +50,9 @@ class AssistUI:
                 with ui.HStack(height=28):
                     ui.Label("Mode:", width=60)
                     self._mode_buttons = {}
-                    for m in ("translation", "rotation", "gripper"):
-                        btn = ui.Button(m, width=90, clicked_fn=lambda mm=m: self._set_mode(mm))
-                        self._mode_buttons[m] = btn
+                    for mode_value, label in (("translate", "Translate"), ("rotate", "Rotate"), ("gripper", "Gripper")):
+                        btn = ui.Button(label, width=90, clicked_fn=lambda mm=mode_value: self._set_mode(mm))
+                        self._mode_buttons[mode_value] = btn
 
                 with ui.HStack(spacing=8):
                     ui.Button("Ask assistance", height=32, clicked_fn=self._on_ask)
@@ -64,6 +67,9 @@ class AssistUI:
 
                 # Optional workspace hint (no grid UI; keep only a compact bounds hint).
                 self._bounds_label = ui.Label("", word_wrap=True)
+
+        # Apply initial highlight
+        self.set_mode(self._mode)
 
         # Separate log window (debug/engineer-facing).
         self.log_window = None
@@ -96,11 +102,42 @@ class AssistUI:
         self._bounds_label.text = f"Workspace X[{workspace_min[0]:.2f},{workspace_max[0]:.2f}] Y[{workspace_min[1]:.2f},{workspace_max[1]:.2f}]"
 
     def _set_mode(self, mode: str) -> None:
-        self._mode = mode
+        # Called from UI button clicks (should also notify controller).
+        self.set_mode(mode)
         try:
-            self._on_mode_change(mode)
+            self._on_mode_change(self._mode)
         except Exception:
             pass
+
+    def set_mode(self, mode: str) -> None:
+        """Update the UI highlight to reflect the current mode (no controller side-effects)."""
+        m = str(mode).lower().strip()
+        if m in {"translation"}:
+            m = "translate"
+        if m in {"rotation"}:
+            m = "rotate"
+        if m not in {"translate", "rotate", "gripper"}:
+            return
+        self._mode = m
+        if not self.enabled or self._ui is None:
+            return
+        # Highlight active mode button.
+        active_style = {
+            "background_color": 0x2D6CDFff,  # blue-ish
+            "color": 0xFFFFFFFF,
+            "border_width": 0,
+        }
+        inactive_style = {
+            "background_color": 0x252525ff,
+            "color": 0xDDDDDDff,
+            "border_width": 1,
+        }
+        for mv, btn in (self._mode_buttons or {}).items():
+            try:
+                btn.style = active_style if mv == self._mode else inactive_style
+            except Exception:
+                # Some omni.ui builds don't expose `.style` as settable; ignore.
+                pass
 
     def set_choices(self, choices: Sequence[str]) -> None:
         self._choices = choices
