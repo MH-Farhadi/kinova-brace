@@ -38,6 +38,18 @@ from copilot_demo.extractor import ExtractorConfig, InputExtractor
 from copilot_demo.executor import ActionExecutor, ExecutorConfig
 
 
+def _mode_for_oracle(mode: str | None) -> str:
+    """Map controller/UI mode to oracle's expected UserState.mode values."""
+    m = str(mode or "translation").lower().strip()
+    if m == "translate":
+        return "translation"
+    if m == "rotate":
+        return "rotation"
+    if m in {"translation", "rotation", "gripper"}:
+        return m
+    return "translation"
+
+
 def _choice_to_user_content(choice_str: str) -> str:
     s = choice_str.strip()
     semantic = _strip_choice_label(s).strip().upper()
@@ -453,7 +465,7 @@ def main() -> None:
                     o.label = id_to_label[o.id]
         except Exception:
             objs = []
-        extractor.memory["user_state"] = {"mode": mode_manager.current_mode.value}
+        extractor.memory["user_state"] = {"mode": _mode_for_oracle(mode_manager.current_mode.value)}
         input_blob = extractor.build_from_robot(robot, ee_body_id, objs, user_state=extractor.memory.get("user_state"))
         try:
             tool_call = backend.predict(input_blob)
@@ -529,7 +541,7 @@ def main() -> None:
         if m not in {"translate", "rotate", "gripper"}:
             return
         mode_manager.switch_to(m)  # controller + UI will be updated via the mode_manager callback below
-        extractor.memory["user_state"] = {"mode": m}
+        extractor.memory["user_state"] = {"mode": _mode_for_oracle(m)}
 
     def on_reset() -> None:
         extractor.reset()
@@ -563,7 +575,7 @@ def main() -> None:
                 ui.set_mode(new_mode.value)
             except Exception:
                 pass
-        extractor.memory["user_state"] = {"mode": str(new_mode.value)}
+        extractor.memory["user_state"] = {"mode": _mode_for_oracle(str(new_mode.value))}
 
     mode_manager.set_mode_change_callback(_on_mode_changed)
     # Apply initial mode state to UI/controller.
