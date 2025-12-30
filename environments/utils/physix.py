@@ -33,6 +33,12 @@ class PhysicsConfig:
     z_clearance: float = 0.005
     orientation_euler_deg: Tuple[float, float, float] | None = (-90, 0, 0)
 
+    # Collision strategy
+    # If True, ObjectLoader will disable authored colliders and attach a simple box proxy collider.
+    # This can reduce PhysX spam for dynamic triangle-mesh collision, but may change contact behavior.
+    use_collision_proxies: bool = False
+    collision_proxy_padding_m: float = 0.003
+
     # Visual fallback
     apply_preview_surface: bool = False
     preview_surface_diffuse: Tuple[float, float, float] = (0.7, 0.7, 0.7)
@@ -64,4 +70,6 @@ def object_loader_kwargs_from_physix(phys: PhysicsConfig) -> dict:
         "orientation_euler_deg": None if phys.orientation_euler_deg is None else tuple(phys.orientation_euler_deg),
         "apply_preview_surface": bool(phys.apply_preview_surface),
         "preview_surface_diffuse": tuple(phys.preview_surface_diffuse),
+        "use_collision_proxies": bool(phys.use_collision_proxies),
+        "collision_proxy_padding_m": float(phys.collision_proxy_padding_m),
     }
