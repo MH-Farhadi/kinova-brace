@@ -197,7 +197,7 @@ Common arguments for tuning the data collection process:
 
 ## VLA data collection (recommended command)
 
-Uniform boxes + cuRobo planner + cameras + domain randomization, with **box locations reshuffled every 4 episodes**:
+Uniform boxes + cuRobo planner + cameras + domain randomization, with **box locations reshuffled every episode**:
 
 ```bash
 python -m data_collection.collect_data \
@@ -219,5 +219,6 @@ python -m data_collection.collect_data \
   --min-distance 0.20 \
   --domain-rand \
   --domain-rand-seed 0 \
-  --respawn-every-n-episodes 4
+  --respawn-every-n-episodes 1
 ```
+
