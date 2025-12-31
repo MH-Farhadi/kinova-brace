@@ -4,6 +4,7 @@ import random
 import math
 import importlib
 import re
+import traceback
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, Sequence
@@ -68,7 +69,9 @@ class ObjectLoaderConfig:
     # If True, disable authored mesh collisions on imported assets (often triangle-mesh / meshSimplification)
     # and attach a simple box collision proxy under the rigid body root. This avoids PhysX GPU spam:
     # "triangle mesh collision ... cannot be part of a dynamic body".
-    use_collision_proxies: bool = True
+    # NOTE: Default is False to preserve “solid” asset collisions.
+    # Enable proxies only if you explicitly want simplified collisions.
+    use_collision_proxies: bool = False
     collision_proxy_padding_m: float = 0.003
     
     # Spawn mode: "usd" (default) or "box"
@@ -81,6 +84,12 @@ class ObjectLoaderConfig:
     box_color_palette: Sequence[tuple[float, float, float]] | None = None
     # Optional names corresponding to `box_color_palette` (not used by ObjectLoader itself, but useful for logging).
     box_color_names: Sequence[str] | None = None
+
+    # Error reporting / strictness
+    # If True, print full tracebacks for exceptions that were previously swallowed.
+    report_exceptions: bool = True
+    # If True, re-raise exceptions instead of continuing (useful to stop on first failure).
+    raise_on_exceptions: bool = False
 
 
 class ObjectLoader:
@@ -107,6 +116,14 @@ class ObjectLoader:
             print("[ObjectLoader] Available labels:")
             for lbl in unique_labels:
                 print(f"  - {lbl}")
+
+    def _handle_exception(self, where: str, exc: BaseException) -> None:
+        """Centralized exception handler for optionally strict error reporting."""
+        if bool(getattr(self.cfg, "report_exceptions", True)):
+            print(f"[ObjectLoader][ERROR] {where}: {exc}")
+            print(traceback.format_exc())
+        if bool(getattr(self.cfg, "raise_on_exceptions", False)):
+            raise exc
 
     def get_last_spawn_labels(self) -> dict[str, str]:
         """Return a copy of the last spawn's mapping from prim path to label.
@@ -147,7 +164,7 @@ class ObjectLoader:
         try:
             omni_client = importlib.import_module("omni.client")
         except Exception:
-            pass
+            omni_client = None
 
         def is_nucleus_dir(path_str: str) -> bool:
             if path_str.startswith(("omniverse://", "http://", "https://")):
@@ -215,8 +232,10 @@ class ObjectLoader:
                         if res2 == getattr(omni_client, "Result").OK:
                             stack.append(child)
                     except Exception:
-                        pass
+                        # Skip non-directories
+                        continue
             except Exception:
+                # Skip failed list attempts; keep walking other branches.
                 continue
                 
         return urls
@@ -485,6 +504,11 @@ class ObjectLoader:
                     bmin = aligned.GetMin()
                     bmax = aligned.GetMax()
                     size_w = (float(bmax[0] - bmin[0]), float(bmax[1] - bmin[1]), float(bmax[2] - bmin[2]))
+                    # If bounds are invalid/tiny (often happens if asset geometry isn't loaded yet),
+                    # skip proxy creation and fall back to normal collision handling.
+                    if any((not math.isfinite(v) or v <= 1e-6) for v in size_w):
+                        print(f"[ObjectLoader][WARN] Proxy AABB invalid for '{root_prim_path}' (size_w={size_w}); skipping proxy.")
+                        return
                     # Add small padding so contact doesn't miss due to approximation
                     pad = float(getattr(self.cfg, "collision_proxy_padding_m", 0.0))
                     size_w = (max(1e-3, size_w[0] + 2 * pad), max(1e-3, size_w[1] + 2 * pad), max(1e-3, size_w[2] + 2 * pad))
@@ -606,11 +630,8 @@ class ObjectLoader:
             define_mass_properties(prim_path, mass_cfg)
             
         except Exception as e:
-            # Avoid silent failure here; if we can't modify collision approximation,
-            # PhysX will spam errors and performance will tank.
-            if not hasattr(self, "_warned_physics_schema_failure"):
-                setattr(self, "_warned_physics_schema_failure", True)
-                print(f"[ObjectLoader][WARN] Failed to apply physics/collision schemas on '{prim_path}': {e}")
+            # Report and optionally raise (no more silent failures).
+            self._handle_exception(f"_ensure_object_physics(prim_path={prim_path})", e)
 
     def spawn(self, parent_prim_path: str, num_objects: int) -> list[str]:
         """Spawn random objects under the given parent prim."""
@@ -660,7 +681,11 @@ class ObjectLoader:
                 from isaaclab.sim.spawners.materials.visual_materials_cfg import PreviewSurfaceCfg
                 from isaaclab.sim.spawners.materials.physics_materials_cfg import RigidBodyMaterialCfg
             except Exception:
-                pass
+                # This is a real setup error in box mode; report it.
+                print("[ObjectLoader][ERROR] Failed to import box spawning dependencies from IsaacLab.")
+                print(traceback.format_exc())
+                if getattr(self.cfg, "raise_on_exceptions", False):
+                    raise
             if CuboidCfg is None:
                 print(
                     "[ObjectLoader][ERROR] spawn_mode='box' but required IsaacLab shape spawners could not be imported. "
@@ -755,7 +780,7 @@ class ObjectLoader:
                     # Spawn object
                     usd_cfg.func(prim_path, usd_cfg, translation=pos, orientation=orientation)
                     
-                    # Ensure physics (silent fallback)
+                    # Ensure physics (report on failure)
                     if self.cfg.enable_physics:
                         self._ensure_object_physics(prim_path)
                 
@@ -763,36 +788,12 @@ class ObjectLoader:
                 self._last_spawn_label_map[prim_path] = label
                 
             except Exception as e:
-                # Do NOT fail silently; partial spawns lead to confusing downstream behavior
-                # (e.g., target selection always picking Obj_01 because only 1 object actually spawned).
-                if not hasattr(self, "_spawn_failures"):
-                    setattr(self, "_spawn_failures", [])
-                try:
-                    getattr(self, "_spawn_failures").append((prim_path, str(e)))  # type: ignore[attr-defined]
-                except Exception:
-                    pass
-                continue  # Skip failed spawns, but report after loop
-
-        # Report spawn failures (if any) and count mismatch
-        try:
-            failures = list(getattr(self, "_spawn_failures", []))  # type: ignore[attr-defined]
-        except Exception:
-            failures = []
-        if failures:
-            # show only first few to avoid flooding logs
-            print(f"[ObjectLoader][WARN] {len(failures)} object spawns failed. First failures:")
-            for prim_path, msg in failures[:5]:
-                print(f"  - {prim_path}: {msg}")
-            # reset for next call
-            try:
-                setattr(self, "_spawn_failures", [])
-            except Exception:
-                pass
-
-        if len(spawned_prim_paths) < int(num_objects):
-            print(
-                f"[ObjectLoader][WARN] Requested {int(num_objects)} objects but spawned {len(spawned_prim_paths)}. "
-                "This will reduce task diversity."
-            )
+                # Report and optionally raise (no more silent failure).
+                self._handle_exception(
+                    f"spawn(idx={idx}, prim_path={prim_path}, item={item}, spawn_mode={self.cfg.spawn_mode})",
+                    e,
+                )
+                # If not strict, keep going so you can see multiple failures.
+                continue
 
         return spawned_prim_paths

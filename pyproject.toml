@@ -29,5 +29,10 @@ packages = [
   "motion_generation.grasp_estimation",
   "motion_generation.planners",
   "utilities",
+  "copilot_demo",
 ]
-include-package-data = true 
+include-package-data = true
+
+[tool.setuptools.package-dir]
+# Keep demo code under `copilot-demo/`, but still install `copilot_demo` as a normal package.
+copilot_demo = "copilot-demo/copilot_demo"
