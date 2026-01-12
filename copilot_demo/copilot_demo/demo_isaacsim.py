@@ -228,9 +228,16 @@ def parse_args() -> argparse.Namespace:
     ap = argparse.ArgumentParser()
     ap.add_argument("--debug", action="store_true", help="Show debug UI windows (e.g., logs).")
     ap.add_argument("--backend", choices=["oracle", "hf"], default="oracle")
-    ap.add_argument("--model_name", type=str, default="Qwen/Qwen2.5-7B-Instruct")
-    ap.add_argument("--adapter_path", type=str, default=None)
-    ap.add_argument("--merged_model_path", type=str, default=None)
+    ap.add_argument(
+        "--model_path",
+        type=str,
+        default=None,
+        help="Path/HF id of a merged standalone model directory (recommended).",
+    )
+    # Backward compatible aliases (deprecated).
+    ap.add_argument("--model_name", type=str, default="Qwen/Qwen2.5-7B-Instruct", help="DEPRECATED: use --model_path")
+    ap.add_argument("--merged_model_path", type=str, default=None, help="DEPRECATED: use --model_path")
+    ap.add_argument("--adapter_path", type=str, default=None, help="DEPRECATED: adapters are not supported; use a merged model.")
     ap.add_argument("--use_4bit", action=argparse.BooleanOptionalAction, default=False)
     ap.add_argument("--planner", type=str, default="curobo")
     # NOTE: `AppLauncher.add_app_launcher_args(ap)` already defines:
@@ -394,15 +401,18 @@ def main() -> None:
     else:
         from llm.inference import InferenceConfig
 
+        model_path = args.model_path or args.merged_model_path or args.model_name
+        if args.adapter_path:
+            raise SystemExit("adapter_path is deprecated and not supported. Please pass a merged model via --model_path.")
+
         hf_cfg = InferenceConfig(
-            model_name=args.model_name,
-            adapter_path=args.adapter_path,
-            merged_model_path=args.merged_model_path,
+            model_path=str(model_path),
             use_4bit=bool(args.use_4bit),
             temperature=float(args.temperature),
             top_p=float(args.top_p),
             max_new_tokens=int(args.max_new_tokens),
             seed=int(args.seed),
+            deterministic=False,
         )
         backend = HFBackend(hf_cfg)
 

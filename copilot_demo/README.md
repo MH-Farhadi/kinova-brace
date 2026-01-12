@@ -70,8 +70,7 @@ python copilot_demo/copilot_demo/demo_isaacsim.py --backend oracle --planner cur
 ```bash
 python copilot_demo/copilot_demo/demo_isaacsim.py \
   --backend hf \
-  --model_name Qwen/Qwen2.5-7B-Instruct \
-  --adapter_path /home/ali/github/ali-rabiee/grasp-copilot/models/qwen2_5_3b_instruct_ft_010_adapter \
+  --model_path /home/ali/github/ali-rabiee/grasp-copilot/models/checkpoint-3000 \
   --planner curobo
 ```
 
