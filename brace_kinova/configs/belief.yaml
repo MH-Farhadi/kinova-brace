@@ -1,0 +1,26 @@
+bayesian:
+  n_goals: 3
+  initial_beta: 2.0
+  initial_w_theta: 0.8
+  initial_w_dist: 0.2
+  ema_alpha: 0.85
+
+training:
+  learning_rate: 5.0e-3
+  epochs: 200
+  batch_size: 512
+  n_trajectories: 5000
+  trajectory_length: 100
+  log_dir: ./logs/belief
+  save_dir: ./checkpoints
+  save_path: checkpoints/bayesian_inference.pt
+
+human_model:
+  noise_amplitude: 0.032
+  ar_coeff: 0.5
+  spectral_slope: -1.59
+
+env_config: configs/env.yaml
+
+seed: 42
+device: auto

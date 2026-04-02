@@ -1,0 +1,26 @@
+# Replicator GraspingManager config for Kinova JACO2 (j2n6s300) - Antipodal grasps
+# Notes:
+# - Antipodal sampling may require tighter geometry parameters.
+# - Override gripper_path via CLI if your EE path differs.
+
+gripper_path: /World/Origin1/kinova_j2n6s300/j2n6s300_end_effector
+
+sampler_config:
+  sampler_type: antipodal
+  approach_offset_m: 0.10
+  retreat_offset_m: 0.15
+  min_clearance_m: 0.01
+  max_roll_deg: 25.0
+  # Optional filters (enable if available in your Replicator build)
+  # min_contact_distance_m: 0.005
+  # require_parallel_faces: true
+
+gripper:
+  width_open_m: 0.09
+  width_close_m: 0.00
+  finger_length_m: 0.06
+  contact_padding_m: 0.005
+
+
+
+

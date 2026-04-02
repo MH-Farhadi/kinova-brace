@@ -1,0 +1,34 @@
+algorithm: SAC
+
+sac:
+  learning_rate: 3.0e-4
+  buffer_size: 400000
+  batch_size: 1024
+  tau: 0.005
+  gamma: 0.99
+  train_freq: 64
+  gradient_steps: 64
+  learning_starts: 10000
+  net_arch: [256, 256, 256]
+
+reward:
+  progress_weight: 3.0
+  heading_penalty_weight: 0.8
+  obstacle_penalty_weight: 2.5
+  d_safe: 0.06
+  goal_bonus: 5.0
+  collision_penalty: 10.0
+
+training:
+  total_timesteps: 1000000
+  log_dir: ./logs/expert
+  save_dir: ./checkpoints
+  save_freq: 50000
+  eval_freq: 20000
+  eval_episodes: 20
+  n_envs: 4
+
+env_config: brace_kinova/configs/env.yaml
+
+seed: 42
+device: auto

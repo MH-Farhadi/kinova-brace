@@ -1,0 +1,38 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "kinova-isaac"
+version = "0.0.0"
+description = "Kinova Isaac demos, controllers, and environments"
+readme = "README.md"
+requires-python = ">=3.11"
+
+[tool.setuptools]
+packages = [
+  "controllers",
+  "controllers.cartesian_velocity",
+  "controllers.input",
+  "controllers.modes",
+  "data_collection",
+  "data_collection.core",
+  "data_collection.envs",
+  "data_collection.engine",
+  "data_collection.profiles",
+  "data_collection.samplers",
+  "environments",
+  "environments.reach_to_grasp",
+  "environments.reach_to_grasp_VLA",
+  "kinova",
+  "motion_generation",
+  "motion_generation.grasp_estimation",
+  "motion_generation.planners",
+  "utilities",
+  "copilot_demo",
+]
+include-package-data = true
+
+[tool.setuptools.package-dir]
+# Keep demo code under `copilot-demo/`, but still install `copilot_demo` as a normal package.
+copilot_demo = "copilot-demo/copilot_demo"

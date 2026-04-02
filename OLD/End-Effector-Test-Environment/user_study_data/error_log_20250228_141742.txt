@@ -1,0 +1,9 @@
+Error occurred at 2025-02-28 14:17:43
+Exception: name 'initialize_environment_fixed' is not defined
+Traceback (most recent call last):
+  File "C:\Users\tnlab\AppData\Local\Temp\ipykernel_7980\1387671545.py", line 921, in <module>
+    main()
+  File "C:\Users\tnlab\AppData\Local\Temp\ipykernel_7980\1387671545.py", line 784, in main
+    initialize_environment_fixed(current_seed)
+    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+NameError: name 'initialize_environment_fixed' is not defined

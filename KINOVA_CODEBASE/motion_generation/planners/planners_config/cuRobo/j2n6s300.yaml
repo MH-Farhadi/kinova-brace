@@ -1,0 +1,131 @@
+## cuRobo MotionGen configuration for Kinova JACO2 (j2n6s300)
+##
+## Fill in 'robot_cfg.kinematics.urdf_path' with an absolute path to your URDF
+## if available. If you rely on the Isaac Sim USD asset, keep 'isaac_usd_path'.
+##
+## This file follows MotionGen-style configs (mg_*). Depending on your cuRobo
+## version, key names may slightly vary. The planner initialization in code
+## tries multiple loaders (from_yaml_file / from_dict / constructor).
+
+tensor_args:
+  device: "cuda:0"
+  dtype: "float32"
+
+robot_cfg:
+  kinematics:
+    # Prefer URDF when available:
+    urdf_path: "/home/ali/github/test/kinova-isaac/motion_generation/motion_generation_config/cuRobo/kinovaJacoJ2N6S300.urdf"
+    asset_root_path: ""
+    # Isaac USD (optional, if you use Nucleus assets):
+    isaac_usd_path: "/Isaac/Robots/Kinova/Jaco2/J2N6S300/j2n6s300_instanceable.usd"
+    usd_path: ""
+    usd_robot_root: "/j2n6s300"  # adjust if your USD has a different root prim
+    usd_flip_joints: {}
+    usd_flip_joint_limits: []
+
+    base_link: "j2n6s300_link_base"
+    ee_link: "j2n6s300_end_effector"
+    link_names: null
+    lock_joints: null
+    extra_links: null
+
+    # Collision model:
+    # IMPORTANT: Some cuRobo builds error if collision_link_names is provided but collision_spheres is null.
+    # For maximum compatibility, keep collision_link_names unset and let cuRobo infer collision geometry
+    # from the URDF / defaults, unless you provide an explicit sphere model.
+    collision_link_names: null
+    collision_spheres: null
+    collision_sphere_buffer: 0.005
+    extra_collision_spheres: {}
+    self_collision_ignore: {}
+    self_collision_buffer: {}
+
+    use_global_cumul: true
+    mesh_link_names: null
+    external_asset_path: null
+
+    cspace:
+      joint_names:
+        - j2n6s300_joint_1
+        - j2n6s300_joint_2
+        - j2n6s300_joint_3
+        - j2n6s300_joint_4
+        - j2n6s300_joint_5
+        - j2n6s300_joint_6
+      retract_config: [0.0, 3.14, 0.0, 3.14, 0.0, 3.14]
+      null_space_weight: [1, 1, 1, 1, 1, 1]
+      cspace_distance_weight: [1, 1, 1, 1, 1, 1]
+      max_acceleration: 15.0
+      max_jerk: 500.0
+
+world_coll_checker:
+  type: "mesh"    # alternatives depend on your cuRobo build
+  distance_threshold: 0.005
+
+# Inverse kinematics solver parameters
+ik_solver:
+  max_iters: 128
+  tol_pos_m: 0.001
+  tol_ori_rad: 0.01
+  line_search: true
+
+# Graph planner (sampling-based) parameters
+graph_planner:
+  type: "rrt_connect"
+  # Keep interactive runs responsive (lower = less UI lag if planning is hard)
+  max_planning_time_s: 0.5
+  max_nodes: 2048
+  connect_radius: 0.25
+
+# Trajectory optimization (task-space) parameters
+trajopt_solver:
+  type: "lbfgs"
+  max_iters: 150
+  step_size: 0.25
+  line_search: true
+  weights:
+    position: 1.0
+    orientation: 0.5
+    velocity: 0.01
+    acceleration: 0.01
+    jerk: 0.001
+
+# Joint-space trajectory optimization (coarse/fallback)
+js_trajopt_solver:
+  type: "lbfgs"
+  max_iters: 100
+  weights:
+    velocity: 0.05
+    acceleration: 0.02
+    jerk: 0.002
+
+# Fine-tuning solvers (optional final smoothing)
+finetune_js_trajopt_solver:
+  type: "lbfgs"
+  max_iters: 50
+  weights:
+    velocity: 0.025
+    acceleration: 0.01
+    jerk: 0.001
+
+finetune_trajopt_solver:
+  type: "lbfgs"
+  max_iters: 50
+  weights:
+    position: 1.0
+    orientation: 0.75
+    velocity: 0.01
+    acceleration: 0.01
+    jerk: 0.001
+
+# Seed counts for different phases
+graph_seeds: 4
+trajopt_seeds: 2
+noisy_trajopt_seeds: 4
+batch_ik_seeds: 32
+batch_trajopt_seeds: 16
+
+# Interpolation
+interpolation_type: "linear"
+interpolation_steps: 48
+partial_ik_iters: 4

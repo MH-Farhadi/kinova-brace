@@ -1,0 +1,89 @@
+ppo:
+  learning_rate: 3.0e-4
+  lr_schedule: cosine
+  n_steps: 1024
+  batch_size: 1024
+  n_epochs: 4
+  gamma: 0.99
+  gae_lambda: 0.95
+  clip_range: 0.2
+  net_arch:
+    pi: [256, 256]
+    vf: [256, 256]
+  activation: relu
+
+bayesian:
+  initial_beta: 2.0
+  initial_w_theta: 0.8
+  initial_w_dist: 0.2
+  ema_alpha: 0.85
+  initial_temperature: 1.0
+  temperature_decay: 0.999
+  temperature_min: 0.1
+  confidence_threshold: 0.8
+  lr: 1.0e-3
+  gradient_clip_norm: 1.0
+
+reward:
+  w_collision: 10.0
+  w_proximity: 2.5
+  w_far: 1.5
+  w_progress: 3.0
+  w_autonomy: 1.5
+  w_goal: 2.0
+  near_threshold: 0.06
+  far_threshold: 0.20
+
+training:
+  total_timesteps: 2000000
+  alpha_initial: 0.3
+  alpha_final: 0.9
+  alpha_anneal_steps: 500000
+  log_dir: ./logs/arbitration
+  save_dir: ./checkpoints
+  save_freq: 50000
+  eval_freq: 10000
+  eval_episodes: 50
+  n_envs: 8
+
+human_model:
+  noise_amplitude: 0.032
+  ar_coeff: 0.5
+  spectral_slope: -1.59
+
+expert_path: checkpoints/expert_sac.zip
+belief_path: checkpoints/bayesian_inference.pt
+
+curriculum:
+  enabled: true
+  stages:
+    - name: basic_reaching
+      n_objects: 1
+      n_obstacles: 0
+      min_episodes: 100
+      success_threshold: 0.80
+    - name: collision_avoidance
+      n_objects: 1
+      n_obstacles: 3
+      min_episodes: 200
+      success_threshold: 0.75
+      max_collision_rate: 0.15
+    - name: challenging_obstacles
+      n_objects: 1
+      n_obstacles: 4
+      min_episodes: 300
+      success_threshold: 0.70
+    - name: goal_ambiguity
+      n_objects: 3
+      n_obstacles: 3
+      min_episodes: 400
+      success_threshold: 0.65
+    - name: full_complexity
+      n_objects: 3
+      n_obstacles: 4
+      plateau_window: 200
+
+env_config: configs/env.yaml
+
+seed: 42
+device: auto
