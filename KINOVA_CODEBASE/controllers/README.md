@@ -8,7 +8,7 @@ This code is meant to run under Isaac Lab / Isaac Sim. Use the Isaac Lab launche
 
 ```bash
 cd <repo-root>
-./IsaacLab/isaaclab.sh -p kinova-isaac/controllers/demo.py --device cuda
+./IsaacLab/isaaclab.sh -p KINOVA_CODEBASE/controllers/demo.py --device cuda
 ```
 
 ## Notes

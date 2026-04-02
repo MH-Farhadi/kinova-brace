@@ -12,15 +12,15 @@ Small Isaac Sim demo that wires **grasp-copilot** style “tool calls” into a 
 ### Prerequisites
 
 - You should run inside the **Isaac Sim runtime** (IsaacLab environment).
-- This repo expects the **`grasp-copilot/`** folder to exist next to the repo root (used for `data_generator` + optional `llm`).
+- This repo expects the **`grasp-copilot/`** folder to exist next to the repository root that contains `IsaacLab/` (used for `data_generator` + optional `llm`).
 
 ### Run (recommended)
 
-From repo root (uses IsaacLab’s python):
+From a workspace directory that contains `IsaacLab/` and this repository (adjust paths):
 
 ```bash
-cd /home/ali/github/ali-rabiee
-./IsaacLab/isaaclab.sh -p -m copilot_demo.demo_isaacsim \
+cd <path-to-KINOVA_CODEBASE>
+/path/to/IsaacLab/isaaclab.sh -p -m copilot_demo.demo_isaacsim \
   --backend oracle \
   --planner curobo \
   --enable_cameras \
@@ -32,7 +32,7 @@ cd /home/ali/github/ali-rabiee
 If you prefer running directly (make sure you activate your env first):
 
 ```bash
-cd /home/ali/github/ali-rabiee/kinova-isaac
+cd <path-to-KINOVA_CODEBASE>
 conda activate kinova
 python copilot_demo/copilot_demo/demo_isaacsim.py --backend oracle --planner curobo --enable_cameras --device cuda:0
 ```
@@ -70,14 +70,14 @@ python copilot_demo/copilot_demo/demo_isaacsim.py --backend oracle --planner cur
 ```bash
 python copilot_demo/copilot_demo/demo_isaacsim.py \
   --backend hf \
-  --model_path /home/ali/github/ali-rabiee/grasp-copilot/models/checkpoint-3000 \
+  --model_path <path-to-grasp-copilot-checkpoint> \
   --planner curobo
 ```
 
 ### Tests (no Isaac Sim required for most)
 
 ```bash
-cd /home/ali/github/ali-rabiee/kinova-isaac
+cd <path-to-KINOVA_CODEBASE>
 pytest -q copilot_demo/tests
 ```
 
@@ -94,5 +94,4 @@ ISAACSIM_AVAILABLE=1 pytest -q copilot_demo/tests/test_headless_opt_in.py
 - **Objects float/sink / weird collisions**
   - Collision proxies are **off by default** now (`PhysicsConfig.use_collision_proxies = False`).
   - If you enable proxies, expect simplified contact behavior.
-
 

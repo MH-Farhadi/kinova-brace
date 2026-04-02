@@ -10,7 +10,7 @@ Scene setup and object loading utilities used by the Kinova demos:
 
 ```bash
 cd <repo-root>
-./IsaacLab/isaaclab.sh -p kinova-isaac/environments/reach_to_grasp/demo.py --device cuda
+./IsaacLab/isaaclab.sh -p KINOVA_CODEBASE/environments/reach_to_grasp/demo.py --device cuda
 ```
 
 

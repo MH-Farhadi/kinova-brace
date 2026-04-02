@@ -17,27 +17,27 @@ This package is structured to support **multiple environments** + **multiple dat
 ### `collect_data` (recommended: env + profile)
 
 This entrypoint lets you choose:
-- **`--env`**: which environment to load from `kinova-isaac/environments/*`
+- **`--env`**: which environment to load from `KINOVA_CODEBASE/environments/*`
 - **`--profile`**: what data structure to record (ticks-only today; add more profiles over time)
 
 #### Quick start (ticks-only, 30s)
 
 ```bash
-cd <repo-root>/kinova-isaac
+cd <repo-root>/KINOVA_CODEBASE
 python -m data_collection.collect_data --env reach_to_grasp --profile ticks_v0 --duration-s 30 --log-rate-hz 10 --logs-root logs/data_collection
 ```
 
 #### Headless + GPU example
 
 ```bash
-cd <repo-root>/kinova-isaac
+cd <repo-root>/KINOVA_CODEBASE
 python -m data_collection.collect_data --env reach_to_grasp --profile ticks_v0 --headless --device cuda:0 --duration-s 60 --log-rate-hz 10 --logs-root logs/data_collection
 ```
 
 #### Interactive keyboard control (GUI)
 
 ```bash
-cd <repo-root>/kinova-isaac
+cd <repo-root>/KINOVA_CODEBASE
 python -m data_collection.collect_data --env reach_to_grasp --profile ticks_v0 --control keyboard --duration-s 60 --logs-root logs/data_collection
 ```
 
@@ -62,7 +62,7 @@ python -m data_collection.collect_data --env reach_to_grasp --profile ticks_v0 -
 
 ```bash
 cd <repo-root>
-./IsaacLab/isaaclab.sh -p kinova-isaac/data_collection/demo.py --headless --device cuda --planner scripted --num-episodes 10 --logs-root kinova-isaac/logs/data_collection
+./IsaacLab/isaaclab.sh -p KINOVA_CODEBASE/data_collection/demo.py --headless --device cuda --planner scripted --num-episodes 10 --logs-root KINOVA_CODEBASE/logs/data_collection
 ```
 
 ## Notes

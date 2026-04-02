@@ -13,13 +13,13 @@ Use Isaac Lab’s launcher so the correct Isaac Sim Python/runtime is used:
 
 ```bash
 cd <repo-root>
-./IsaacLab/isaaclab.sh -p kinova-isaac/motion_generation/demo.py --device cuda --planner scripted --grasp obb --num-episodes 3
+./IsaacLab/isaaclab.sh -p KINOVA_CODEBASE/motion_generation/demo.py --device cuda --planner scripted --grasp obb --num-episodes 3
 ```
 
 Headless:
 
 ```bash
-./IsaacLab/isaaclab.sh -p kinova-isaac/motion_generation/demo.py --headless --device cuda --planner scripted --num-episodes 3
+./IsaacLab/isaaclab.sh -p KINOVA_CODEBASE/motion_generation/demo.py --headless --device cuda --planner scripted --num-episodes 3
 ```
 
 ## Common options

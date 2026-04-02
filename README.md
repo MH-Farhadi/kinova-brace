@@ -1,8 +1,17 @@
 # BRACE Kinova
 
-BRACE (**Bayesian Reinforcement Assistance with Context Encoding**) for a Kinova reach-and-grasp shared-autonomy task in a **2D planar workspace**.
+This repository combines two related codebases:
 
-This repository now includes a full modular Python implementation under `brace_kinova/`:
+1. **BRACE** (**Bayesian Reinforcement Assistance with Context Encoding**) — a modular Python stack for a Kinova reach-and-grasp shared-autonomy task in a **2D planar workspace**, under `brace_kinova/`.
+2. **Kinova Isaac simulation** — Isaac Lab demos, controllers, motion generation, and data collection for a Kinova Jaco2 (J2N6S300), under `KINOVA_CODEBASE/` (copied from a standalone project; it is **not** a git submodule and is tracked like any other folder).
+
+Full detail for the simulation stack lives in [`KINOVA_CODEBASE/README.md`](KINOVA_CODEBASE/README.md).
+
+---
+
+## BRACE (`brace_kinova/`)
+
+BRACE implements learning and deployment for the planar reach-and-grasp task. The main Python package lives under `brace_kinova/`:
 
 - `envs/`: 2D Gymnasium reach-grasp env, scenarios, wrappers
 - `models/`: Bayesian inference, PPO arbitration policy, expert wrapper, simulated human
@@ -22,22 +31,31 @@ This repository now includes a full modular Python implementation under `brace_k
 - ROS 1 deployment interface (`rospy`) for Kinova control path
 - GPU auto-detection (`cuda` when available)
 
-## Project Layout
+## Project layout
 
 ```text
-brace_kinova/
-├── __init__.py
-├── requirements.txt
-├── configs/
-│   ├── env.yaml
-│   ├── expert.yaml
-│   ├── belief.yaml
-│   └── arbitration.yaml
-├── envs/
-├── models/
-├── training/
-├── evaluation/
-└── ros_interface/
+.
+├── brace_kinova/                 # BRACE training, evaluation, ROS
+│   ├── __init__.py
+│   ├── requirements.txt
+│   ├── configs/
+│   │   ├── env.yaml
+│   │   ├── expert.yaml
+│   │   ├── belief.yaml
+│   │   └── arbitration.yaml
+│   ├── envs/
+│   ├── models/
+│   ├── training/
+│   ├── evaluation/
+│   └── ros_interface/
+└── KINOVA_CODEBASE/              # Isaac Lab: demos, controllers, data collection
+    ├── demo.py
+    ├── controllers/
+    ├── motion_generation/
+    ├── data_collection/
+    ├── environments/
+    ├── copilot_demo/
+    └── pyproject.toml
 ```
 
 ## Setup
@@ -88,7 +106,22 @@ Requires ROS 1 + Kinova `ros_kortex` setup:
 rosrun brace_kinova brace_node.py _config_path:=brace_kinova/configs/arbitration.yaml
 ```
 
+## Kinova Isaac simulation (`KINOVA_CODEBASE/`)
+
+Isaac Lab–based simulation and tooling: cartesian velocity teleop, motion generation (scripted / RMPflow / cuRobo / Lula), grasp-loop demos, VLA-oriented data collection, and an optional Copilot demo (see package READMEs inside each subfolder).
+
+**Prerequisites:** Isaac Sim + Isaac Lab on your machine; run scripts with Isaac Lab’s launcher so the correct Python/runtime is used, for example:
+
+```bash
+cd <path-to-IsaacLab>
+./isaaclab.sh -p <path-to-this-repo>/KINOVA_CODEBASE/demo.py --device cuda
+```
+
+Replace `<path-to-this-repo>` with the absolute path to this repository’s root. Module and CLI options are documented in [`KINOVA_CODEBASE/README.md`](KINOVA_CODEBASE/README.md) (data collection, motion generation, copilot, etc.).
+
+---
+
 ## Notes
 
 - A longer implementation breakdown is in `IMPLEMENTATION_SUMMARY.md`.
-- This implementation follows the architecture and hyperparameter guidance from `PROMPT.md`.
+- This implementation follows the architecture and hyperparameter guidance from `PROMPT.md` (which still refers to the upstream project as “kinova-isaac” in places; on disk that code now lives under `KINOVA_CODEBASE/`).
