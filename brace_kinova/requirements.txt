@@ -1,3 +1,4 @@
+# Core dependencies (required for 2D env and all training)
 gymnasium
 stable-baselines3
 torch
@@ -7,3 +8,11 @@ pyyaml
 tensorboard
 matplotlib
 pygame
+
+# Isaac Sim dependencies (only needed for Isaac-backed training)
+# These are provided by the Isaac Lab environment and should NOT
+# be pip-installed separately:
+#   isaaclab
+#   isaaclab_assets
+#   isaacsim
+#   omni.usd

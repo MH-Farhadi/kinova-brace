@@ -1,127 +1,160 @@
 # BRACE Kinova
 
-This repository combines two related codebases:
+This repository combines two related codebases for shared-autonomy research with a Kinova robot:
 
-1. **BRACE** (**Bayesian Reinforcement Assistance with Context Encoding**) — a modular Python stack for a Kinova reach-and-grasp shared-autonomy task in a **2D planar workspace**, under `brace_kinova/`.
-2. **Kinova Isaac simulation** — Isaac Lab demos, controllers, motion generation, and data collection for a Kinova Jaco2 (J2N6S300), under `KINOVA_CODEBASE/` (copied from a standalone project; it is **not** a git submodule and is tracked like any other folder).
-
-Full detail for the simulation stack lives in [`KINOVA_CODEBASE/README.md`](KINOVA_CODEBASE/README.md).
+1. **BRACE** (**Bayesian Reinforcement Assistance with Context Encoding**) — a modular Python stack for training and deploying assistance-arbitration policies on a 2D planar reach-and-grasp task, under `brace_kinova/`.
+2. **Kinova Isaac simulation** — Isaac Lab demos, controllers, motion generation, and data collection for a Kinova Jaco2 (J2N6S300), under `KINOVA_CODEBASE/`.
 
 ---
 
-## BRACE (`brace_kinova/`)
+## Quick Start
 
-BRACE implements learning and deployment for the planar reach-and-grasp task. The main Python package lives under `brace_kinova/`:
-
-- `envs/`: 2D Gymnasium reach-grasp env, scenarios, wrappers
-- `models/`: Bayesian inference, PPO arbitration policy, expert wrapper, simulated human
-- `training/`: expert training (SAC), belief pretraining, arbitration training (PPO + curriculum), rewards, callbacks
-- `evaluation/`: baseline + BRACE evaluation and plotting utilities
-- `ros_interface/`: ROS 1 inference node, Kinova bridge, DualSense interface
-- `configs/`: YAML configs for environment, expert, belief, and arbitration
-
-## Implemented Features
-
-- Bayesian belief update with learnable `beta`, `w_theta`, `w_dist` using `nn.Parameter` + `softplus`
-- PPO-compatible scalar arbitration policy with `gamma = 0.5 * (action + 1)`
-- 5-stage curriculum progression (basic reaching to full complexity)
-- Simulated human model with minimum-jerk direction + potential-field avoidance + AR(1) pink noise
-- Expert training pipeline (SAC), belief pretraining, and arbitration training pipeline
-- Evaluation pipeline with success, time, collision, belief-accuracy, and gamma metrics
-- ROS 1 deployment interface (`rospy`) for Kinova control path
-- GPU auto-detection (`cuda` when available)
-
-## Project layout
-
-```text
-.
-├── brace_kinova/                 # BRACE training, evaluation, ROS
-│   ├── __init__.py
-│   ├── requirements.txt
-│   ├── configs/
-│   │   ├── env.yaml
-│   │   ├── expert.yaml
-│   │   ├── belief.yaml
-│   │   └── arbitration.yaml
-│   ├── envs/
-│   ├── models/
-│   ├── training/
-│   ├── evaluation/
-│   └── ros_interface/
-└── KINOVA_CODEBASE/              # Isaac Lab: demos, controllers, data collection
-    ├── demo.py
-    ├── controllers/
-    ├── motion_generation/
-    ├── data_collection/
-    ├── environments/
-    ├── copilot_demo/
-    └── pyproject.toml
-```
-
-## Setup
-
-From repo root:
+### 1. Install BRACE dependencies
 
 ```bash
 pip install -r brace_kinova/requirements.txt
 ```
 
-## Run Commands (Training + Evaluation)
-
-Run these in order from repo root:
+### 2. Train on the lightweight 2D environment (no Isaac Sim needed)
 
 ```bash
-# 1) Train expert (SAC)
+# Expert (SAC)
 python -m brace_kinova.training.train_expert --config brace_kinova/configs/expert.yaml
 
-# 2) Pretrain Bayesian belief module
+# Bayesian belief module
 python -m brace_kinova.training.train_belief --config brace_kinova/configs/belief.yaml
 
-# 3) Train BRACE arbitration (PPO + curriculum)
+# Arbitration (PPO + 5-stage curriculum)
 python -m brace_kinova.training.train_arbitration --config brace_kinova/configs/arbitration.yaml
-
-# 4) Evaluate BRACE and baselines
-python -m brace_kinova.evaluation.evaluate --config brace_kinova/configs/arbitration.yaml --n-episodes 100 --output results.json
 ```
 
-Optional explicit GPU:
+### 3. Train on Isaac Sim with the Kinova Jaco2
+
+Requires Isaac Sim 4.5+ and Isaac Lab.  Run via the Isaac Lab launcher:
 
 ```bash
-python -m brace_kinova.training.train_expert --config brace_kinova/configs/expert.yaml --device cuda
-python -m brace_kinova.training.train_belief --config brace_kinova/configs/belief.yaml --device cuda
-python -m brace_kinova.training.train_arbitration --config brace_kinova/configs/arbitration.yaml --device cuda
+# Expert (SAC) — Kinova Jaco2 in Isaac Sim
+isaaclab -p -m brace_kinova.training.train_isaac_expert \
+    --config brace_kinova/configs/isaac_expert.yaml --headless
+
+# Belief — same as above (uses synthetic data, no sim needed)
+python -m brace_kinova.training.train_belief --config brace_kinova/configs/belief.yaml
+
+# Arbitration (PPO + curriculum) — Kinova Jaco2 in Isaac Sim
+isaaclab -p -m brace_kinova.training.train_isaac_arbitration \
+    --config brace_kinova/configs/isaac_arbitration.yaml --headless
 ```
 
-TensorBoard monitoring:
+### 4. Monitor training
 
 ```bash
 tensorboard --logdir=./logs
 ```
 
-## ROS 1 Deployment (Optional)
+---
 
-Requires ROS 1 + Kinova `ros_kortex` setup:
+## Project Layout
+
+```
+.
+├── brace_kinova/                     # BRACE training / eval / deployment
+│   ├── envs/
+│   │   ├── reach_grasp_env.py        #   Lightweight 2D Gymnasium env
+│   │   ├── isaac_env.py              #   Isaac Lab Gymnasium env (Jaco2)
+│   │   ├── isaac_config.py           #   Isaac env configuration
+│   │   ├── scenarios.py              #   Curriculum scenario definitions
+│   │   └── wrappers.py
+│   ├── models/
+│   │   ├── bayesian_inference.py     #   Learnable Bayesian goal inference
+│   │   ├── arbitration_policy.py     #   PPO scalar gamma policy
+│   │   ├── expert_policy.py          #   SAC expert wrapper
+│   │   └── simulated_human.py        #   Min-jerk + AR(1) noise
+│   ├── training/
+│   │   ├── train_expert.py           #   SAC (2D)
+│   │   ├── train_belief.py           #   Supervised NLL
+│   │   ├── train_arbitration.py      #   PPO + curriculum (2D)
+│   │   ├── train_isaac_expert.py     #   SAC (Isaac Sim)
+│   │   ├── train_isaac_arbitration.py#   PPO + curriculum (Isaac Sim)
+│   │   ├── rewards.py
+│   │   ├── curriculum.py
+│   │   └── callbacks.py
+│   ├── evaluation/
+│   ├── ros_interface/
+│   ├── configs/
+│   │   ├── env.yaml                  #   2D env config
+│   │   ├── expert.yaml / belief.yaml / arbitration.yaml
+│   │   ├── isaac_env.yaml            #   Isaac env config
+│   │   ├── isaac_expert.yaml / isaac_arbitration.yaml
+│   │   └── ...
+│   ├── requirements.txt
+│   └── README.md                     #   Detailed package docs
+│
+├── KINOVA_CODEBASE/                  # Isaac Lab Kinova tooling
+│   ├── demo.py
+│   ├── controllers/                  #   Cartesian velocity jog + safety
+│   ├── environments/                 #   Scene design + object loading
+│   ├── motion_generation/            #   RMPflow / cuRobo / LULA planners
+│   ├── data_collection/              #   VLA-style dataset collection
+│   ├── utilities/                    #   Transforms, robot reset
+│   ├── copilot_demo/                 #   LLM copilot demo
+│   └── README.md
+│
+├── Paper/                            # LaTeX source for the research paper
+├── OLD/                              # Archived legacy material
+├── PROMPT.md                         # Original Cursor agent design brief
+├── IMPLEMENTATION_SUMMARY.md
+└── README.md                         # ← you are here
+```
+
+---
+
+## Two Environment Backends
+
+| Feature              | 2D (`ReachGraspEnv`)        | Isaac (`IsaacReachGraspEnv`)        |
+|----------------------|-----------------------------|--------------------------------------|
+| Physics              | Kinematic integration       | Full Isaac Sim (PhysX)               |
+| Robot model          | Point EE + binary gripper   | Kinova Jaco2 (6-DoF + 3-finger)     |
+| Control              | Velocity → position step    | Diff-IK → joint velocity + grav comp|
+| Speed                | ~50k steps/s (CPU)          | ~200 steps/s (GPU, single env)       |
+| Collision detection  | Distance-based              | Distance-based (same logic)          |
+| Obs / Action space   | Identical                   | Identical                            |
+
+Both environments produce the **same observation and action vectors**, so
+trained models (expert, belief, arbitration) transfer between backends
+without retraining.
+
+---
+
+## BRACE System
+
+BRACE jointly learns:
+
+- **Bayesian Goal Inference**: Recursive belief over N candidate goals using a
+  noisy-rational (Boltzmann) likelihood with learnable parameters (β, w_θ, w_d).
+- **Arbitration Policy (PPO)**: Outputs scalar γ ∈ [0,1] from `[state, belief]`;
+  blends human and expert: `a = (1−γ)h + γw`.
+- **Expert Policy (SAC)**: Frozen during arbitration training; sees true goal.
+
+Training follows a 5-stage curriculum from simple reaching to full complexity
+with multiple goals and obstacles.
+
+---
+
+## ROS 1 Deployment
+
+For real-robot deployment with a DualSense PS5 controller:
 
 ```bash
 rosrun brace_kinova brace_node.py _config_path:=brace_kinova/configs/arbitration.yaml
 ```
 
-## Kinova Isaac simulation (`KINOVA_CODEBASE/`)
-
-Isaac Lab–based simulation and tooling: cartesian velocity teleop, motion generation (scripted / RMPflow / cuRobo / Lula), grasp-loop demos, VLA-oriented data collection, and an optional Copilot demo (see package READMEs inside each subfolder).
-
-**Prerequisites:** Isaac Sim + Isaac Lab on your machine; run scripts with Isaac Lab’s launcher so the correct Python/runtime is used, for example:
-
-```bash
-cd <path-to-IsaacLab>
-./isaaclab.sh -p <path-to-this-repo>/KINOVA_CODEBASE/demo.py --device cuda
-```
-
-Replace `<path-to-this-repo>` with the absolute path to this repository’s root. Module and CLI options are documented in [`KINOVA_CODEBASE/README.md`](KINOVA_CODEBASE/README.md) (data collection, motion generation, copilot, etc.).
+Requires `rospy`, `ros_kortex`, and a connected Kinova arm.
 
 ---
 
 ## Notes
 
-- A longer implementation breakdown is in `IMPLEMENTATION_SUMMARY.md`.
-- This implementation follows the architecture and hyperparameter guidance from `PROMPT.md` (which still refers to the upstream project as “kinova-isaac” in places; on disk that code now lives under `KINOVA_CODEBASE/`).
+- Detailed package documentation: [`brace_kinova/README.md`](brace_kinova/README.md)
+- Kinova Isaac tooling docs: [`KINOVA_CODEBASE/README.md`](KINOVA_CODEBASE/README.md)
+- Implementation breakdown: [`IMPLEMENTATION_SUMMARY.md`](IMPLEMENTATION_SUMMARY.md)
+- Design brief: [`PROMPT.md`](PROMPT.md)

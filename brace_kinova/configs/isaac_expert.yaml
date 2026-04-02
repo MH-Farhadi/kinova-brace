@@ -1,0 +1,33 @@
+sac:
+  learning_rate: 3.0e-4
+  buffer_size: 200000
+  batch_size: 512
+  tau: 0.005
+  gamma: 0.99
+  train_freq: 32
+  gradient_steps: 32
+  learning_starts: 5000
+  net_arch: [256, 256, 256]
+
+training:
+  total_timesteps: 500000
+  log_dir: ./logs/isaac_expert
+  save_dir: ./checkpoints
+  save_freq: 25000
+  eval_freq: 10000
+  eval_episodes: 10
+  n_envs: 1  # Single Isaac Sim instance
+
+reward:
+  progress_weight: 3.0
+  heading_penalty: 0.8
+  obstacle_penalty: 2.5
+  d_safe: 0.06
+  goal_bonus: 5.0
+  collision_penalty: 10.0
+
+env_config: brace_kinova/configs/isaac_env.yaml
+scenario: basic_reaching
+
+seed: 42
+device: cuda:0

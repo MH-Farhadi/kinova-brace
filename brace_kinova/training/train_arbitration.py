@@ -174,6 +174,14 @@ class BraceArbitrationEnv(ReachGraspEnv):
 
         return fused, reward, terminated, truncated, info
 
+    def set_scenario(self, scenario):
+        """Override to resize obs space with belief dimensions after curriculum change."""
+        super().set_scenario(scenario)
+        base_dim = 5 + 2 * self.n_objects + 2 * self.n_obstacles + 1 + self.n_objects
+        self.observation_space = gym.spaces.Box(
+            low=-np.inf, high=np.inf, shape=(base_dim + self._n_goals,), dtype=np.float32,
+        )
+
     def _check_near_goal(self) -> bool:
         dist = np.linalg.norm(self._ee_pos - self.true_goal_position)
         return dist < self.grasp_threshold * 2
@@ -351,7 +359,13 @@ def main():
     )
 
     def update_env_scenario(scenario_config):
-        pass
+        """Reconfigure all sub-environments to the new curriculum scenario."""
+        for i in range(vec_env.num_envs):
+            inner = vec_env.envs[i]
+            # Unwrap Monitor to reach the BraceArbitrationEnv
+            base = inner.env if hasattr(inner, "env") else inner
+            if hasattr(base, "set_scenario"):
+                base.set_scenario(scenario_config.name)
 
     callbacks = CallbackList([
         CurriculumCallback(curriculum, env_update_fn=update_env_scenario),

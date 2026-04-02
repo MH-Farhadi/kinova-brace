@@ -1,0 +1,52 @@
+workspace:
+  x_min: 0.20
+  x_max: 0.60
+  y_min: -0.30
+  y_max: 0.45
+  z_fixed: 0.10
+
+objects:
+  n_objects: 3
+  grasp_threshold: 0.04
+  spawn_x_min: 0.25
+  spawn_x_max: 0.55
+  spawn_y_min: -0.25
+  spawn_y_max: 0.40
+  min_separation: 0.10
+
+obstacles:
+  n_obstacles: 4
+  collision_threshold: 0.045
+  spawn_x_min: 0.25
+  spawn_x_max: 0.55
+  spawn_y_min: -0.25
+  spawn_y_max: 0.40
+  min_separation_from_objects: 0.08
+
+end_effector:
+  max_velocity: 0.15
+  initial_x: 0.30
+  initial_y: 0.0
+  ee_link_name: j2n6s300_end_effector
+
+episode:
+  max_steps: 200
+  control_dt: 0.05
+  physics_dt: 0.004166
+  decimation: 12
+  stabilize_steps: 60
+
+ik:
+  method: dls
+
+gripper:
+  open_pos: 0.0
+  close_pos: 1.2
+
+scene:
+  table_height: 0.80
+  robot_base_height: 0.80
+  object_spawn_z: 0.825
+
+seed: 42
+device: cuda:0
