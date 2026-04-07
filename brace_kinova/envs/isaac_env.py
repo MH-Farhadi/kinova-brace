@@ -32,6 +32,26 @@ from isaaclab.controllers import (
     DifferentialIKControllerCfg,
 )
 from isaaclab.utils.math import subtract_frame_transforms
+from isaaclab.sim.spawners.shapes.shapes_cfg import CuboidCfg as _CuboidCfg
+from isaaclab.sim.spawners.materials.visual_materials_cfg import (
+    PreviewSurfaceCfg as _PreviewSurfaceCfg,
+)
+
+# Default Jaco2 joint positions — arm forward, EE near table surface
+_JACO2_DEFAULT_JOINTS = {
+    "j2n6s300_joint_1": 0.0,
+    "j2n6s300_joint_2": math.pi,
+    "j2n6s300_joint_3": 1.8 * math.pi,
+    "j2n6s300_joint_4": 0.0,
+    "j2n6s300_joint_5": 1.75 * math.pi,
+    "j2n6s300_joint_6": 0.5 * math.pi,
+    "j2n6s300_joint_finger_1": 0.0,
+    "j2n6s300_joint_finger_2": 0.0,
+    "j2n6s300_joint_finger_3": 0.0,
+    "j2n6s300_joint_finger_tip_1": 0.0,
+    "j2n6s300_joint_finger_tip_2": 0.0,
+    "j2n6s300_joint_finger_tip_3": 0.0,
+}
 
 # BRACE imports ------------------------------------------------------------
 from brace_kinova.envs.isaac_config import IsaacBraceEnvConfig, IsaacBraceSceneConfig
@@ -75,8 +95,8 @@ def setup_brace_scene(
     # Robot
     robot_cfg = dc_replace(KINOVA_JACO2_N6S300_CFG, prim_path=scene_cfg.robot_prim_path)
     robot_cfg.init_state.pos = (0.0, 0.0, scene_cfg.robot_base_height)
-    if scene_cfg.robot_default_joint_pos:
-        robot_cfg.init_state.joint_pos = scene_cfg.robot_default_joint_pos
+    joint_pos = scene_cfg.robot_default_joint_pos or _JACO2_DEFAULT_JOINTS
+    robot_cfg.init_state.joint_pos = joint_pos
     robot = Articulation(cfg=robot_cfg)
 
     entities = {"kinova_j2n6s300": robot}
@@ -217,10 +237,11 @@ class IsaacReachGraspEnv(gym.Env):
         for i in range(self.cfg.max_n_objects):
             path = f"{root}/Goal_{i:02d}"
             if _prim_exists(path):
+                self._goal_prim_paths.append(path)
                 continue
-            cfg = sim_utils.CuboidCfg(
+            cfg = _CuboidCfg(
                 size=sc.goal_box_size,
-                visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=sc.goal_color),
+                visual_material=_PreviewSurfaceCfg(diffuse_color=sc.goal_color),
             )
             cfg.func(path, cfg, translation=(0.0, 0.0, -5.0))
             self._goal_prim_paths.append(path)
@@ -228,10 +249,11 @@ class IsaacReachGraspEnv(gym.Env):
         for i in range(self.cfg.max_n_obstacles):
             path = f"{root}/Obstacle_{i:02d}"
             if _prim_exists(path):
+                self._obstacle_prim_paths.append(path)
                 continue
-            cfg = sim_utils.CuboidCfg(
+            cfg = _CuboidCfg(
                 size=sc.obstacle_box_size,
-                visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=sc.obstacle_color),
+                visual_material=_PreviewSurfaceCfg(diffuse_color=sc.obstacle_color),
             )
             cfg.func(path, cfg, translation=(0.0, 0.0, -5.0))
             self._obstacle_prim_paths.append(path)
@@ -304,15 +326,21 @@ class IsaacReachGraspEnv(gym.Env):
         self._step_count = 0
         self._collision_count = 0
 
-        # Reset robot joints
+        # Reset robot joints to default configuration
         self._reset_robot()
 
-        # Stabilise the robot for a few physics steps
+        # Stabilise the robot for a few physics steps (holds joints)
         self._stabilize(self.cfg.stabilize_steps)
 
-        # Read initial EE state in base frame
+        # Capture orientation to hold constant during planar motion
         pos_b, quat_b = self._read_ee_pose_base()
         self._hold_quat = quat_b.clone()
+
+        # Drive EE down to the planar working height before the episode starts
+        self._home_to_start(n_steps=120)
+
+        # Re-read actual EE state after homing
+        pos_b, _ = self._read_ee_pose_base()
         ee_xy = pos_b[0, :2].cpu().numpy().astype(np.float32)
         self._ee_pos_xy = ee_xy.copy()
         self._prev_ee_pos_xy = ee_xy.copy()
@@ -567,6 +595,19 @@ class IsaacReachGraspEnv(gym.Env):
             self.sim.step()
             self.robot.update(self.cfg.physics_dt)
 
+    def _home_to_start(self, n_steps: int = 120) -> None:
+        """Gradually move the EE to the planar start pose via IK.
+
+        This prevents a violent snap from the default joint config
+        (which may have the EE high up) to the z_fixed working plane.
+        """
+        target = torch.tensor(
+            [[self.cfg.ee_initial_x, self.cfg.ee_initial_y, self.cfg.z_fixed]],
+            dtype=torch.float32, device=self._device,
+        )
+        for _ in range(n_steps):
+            self._ik_substep(target, gripper_close=False)
+
     def _place_visual_objects(self) -> None:
         """Move goal / obstacle cuboids to their sampled XY positions."""
         hidden = (0.0, 0.0, -5.0)
@@ -627,7 +668,24 @@ class IsaacExpertReachGraspEnv(IsaacReachGraspEnv):
         )
 
     def _get_obs(self) -> np.ndarray:
-        return self.get_expert_obs()
+        # Must match ``ExpertReachGraspEnv``: base features + one-hot, not
+        # ``get_expert_obs()`` (which calls ``_get_obs()`` → infinite recursion).
+        base = super()._get_obs()
+        goal_one_hot = np.zeros(self.n_objects, dtype=np.float32)
+        goal_one_hot[self._true_goal_idx] = 1.0
+        return np.concatenate([base, goal_one_hot])
+
+    def get_expert_obs(self) -> np.ndarray:
+        """Same as policy observation (one-hot already in ``_get_obs``)."""
+        return self._get_obs()
+
+    def set_scenario(self, scenario: str | ScenarioConfig) -> None:
+        super().set_scenario(scenario)
+        base_dim = 5 + 2 * self.n_objects + 2 * self.n_obstacles + 1 + self.n_objects
+        expert_dim = base_dim + self.n_objects
+        self.observation_space = spaces.Box(
+            low=-np.inf, high=np.inf, shape=(expert_dim,), dtype=np.float32,
+        )
 
 
 # ---------------------------------------------------------------------------

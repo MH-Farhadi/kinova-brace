@@ -23,7 +23,7 @@ from isaaclab.app import AppLauncher
 parser = argparse.ArgumentParser(description="BRACE Arbitration (Isaac Sim)")
 AppLauncher.add_app_launcher_args(parser)
 parser.add_argument("--config", type=str, default="brace_kinova/configs/isaac_arbitration.yaml")
-parser.add_argument("--device", type=str, default=None)
+# Note: --device is registered by AppLauncher. Do not add a second --device.
 args = parser.parse_args()
 
 app_launcher = AppLauncher(args)
@@ -217,7 +217,7 @@ def main() -> None:
         env_cfg_yaml = yaml.safe_load(f)
 
     seed = config.get("seed", 42)
-    device = args.device or config.get("device", "cuda:0")
+    device = getattr(args, "device", None) or config.get("device", "cuda:0")
     print(f"[IsaacArbitration] device={device}  seed={seed}")
 
     np.random.seed(seed)

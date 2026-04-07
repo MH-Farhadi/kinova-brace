@@ -50,7 +50,7 @@ curriculum:
   stages:
     - name: basic_reaching
       n_objects: 1
-      n_obstacles: 0
+      n_obstacles: 2
       min_episodes: 50
       success_threshold: 0.80
     - name: collision_avoidance

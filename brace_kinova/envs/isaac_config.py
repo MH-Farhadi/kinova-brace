@@ -54,7 +54,7 @@ class IsaacBraceEnvConfig:
     x_max: float = 0.60
     y_min: float = -0.30
     y_max: float = 0.45
-    z_fixed: float = 0.10  # Fixed EE height for planar constraint
+    z_fixed: float = 0.03  # Fixed EE height in base frame (≈ table surface)
 
     # End effector
     max_velocity: float = 0.15

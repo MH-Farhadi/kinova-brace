@@ -3,7 +3,7 @@ workspace:
   x_max: 0.60
   y_min: -0.30
   y_max: 0.45
-  z_fixed: 0.10
+  z_fixed: 0.03
 
 objects:
   n_objects: 3

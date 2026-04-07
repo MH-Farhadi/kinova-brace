@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+import time
 from pathlib import Path
 
 # --- AppLauncher MUST run before any Isaac Lab imports --------------------
@@ -21,7 +22,9 @@ from isaaclab.app import AppLauncher
 parser = argparse.ArgumentParser(description="Train SAC expert (Isaac Sim)")
 AppLauncher.add_app_launcher_args(parser)
 parser.add_argument("--config", type=str, default="brace_kinova/configs/isaac_expert.yaml")
-parser.add_argument("--device", type=str, default=None)
+parser.add_argument("--resume_model", type=str, default=None)
+parser.add_argument("--resume_replay_buffer", type=str, default=None)
+# Note: --device is registered by AppLauncher (sim + rendering). Do not add a second --device.
 args = parser.parse_args()
 
 app_launcher = AppLauncher(args)
@@ -33,7 +36,7 @@ import numpy as np
 import torch
 from stable_baselines3 import SAC
 from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
-from stable_baselines3.common.callbacks import EvalCallback, CheckpointCallback
+from stable_baselines3.common.callbacks import EvalCallback, CheckpointCallback, BaseCallback
 from stable_baselines3.common.monitor import Monitor
 
 import isaaclab.sim as sim_utils
@@ -43,6 +46,39 @@ from brace_kinova.envs.isaac_env import (
     setup_brace_scene,
 )
 from brace_kinova.envs.isaac_config import IsaacBraceEnvConfig, IsaacBraceSceneConfig
+
+
+class WallClockCheckpointCallback(BaseCallback):
+    """Save model + replay buffer at fixed wall-clock intervals."""
+
+    def __init__(self, save_dir: Path, interval_seconds: int = 3600, verbose: int = 1):
+        super().__init__(verbose=verbose)
+        self.save_dir = save_dir
+        self.interval_seconds = int(interval_seconds)
+        self._last_save_time = time.time()
+
+    def _on_step(self) -> bool:
+        now = time.time()
+        if now - self._last_save_time < self.interval_seconds:
+            return True
+
+        self.save_dir.mkdir(parents=True, exist_ok=True)
+        stamp = time.strftime("%Y%m%d-%H%M%S", time.localtime(now))
+        step = int(self.num_timesteps)
+        model_path = self.save_dir / f"isaac_expert_sac_time_{stamp}_{step}.zip"
+        replay_path = self.save_dir / f"isaac_expert_sac_time_{stamp}_{step}.replay_buffer.pkl"
+        norm_path = self.save_dir / f"isaac_expert_sac_time_{stamp}_{step}.vecnormalize.pkl"
+
+        self.model.save(str(model_path))
+        self.model.save_replay_buffer(str(replay_path))
+        env = self.model.get_env()
+        if env is not None:
+            env.save(str(norm_path))
+
+        self._last_save_time = now
+        if self.verbose:
+            print(f"[IsaacExpert] Wall-clock checkpoint saved: {model_path.name}")
+        return True
 
 
 def build_env_config(env_cfg: dict) -> IsaacBraceEnvConfig:
@@ -102,7 +138,8 @@ def main() -> None:
         env_cfg_yaml = yaml.safe_load(f)
 
     seed = config.get("seed", 42)
-    device = config.get("device", "cuda:0")
+    # Same device string for Isaac Sim and SB3 (AppLauncher defines --device).
+    device = getattr(args, "device", None) or config.get("device", "cuda:0")
     print(f"[IsaacExpert] device={device}  seed={seed}")
 
     np.random.seed(seed)
@@ -159,23 +196,30 @@ def main() -> None:
     save_dir.mkdir(parents=True, exist_ok=True)
     log_dir.mkdir(parents=True, exist_ok=True)
 
-    model = SAC(
-        "MlpPolicy",
-        vec_env,
-        learning_rate=sac_cfg.get("learning_rate", 3e-4),
-        buffer_size=sac_cfg.get("buffer_size", 200_000),
-        batch_size=sac_cfg.get("batch_size", 512),
-        tau=sac_cfg.get("tau", 0.005),
-        gamma=sac_cfg.get("gamma", 0.99),
-        train_freq=sac_cfg.get("train_freq", 32),
-        gradient_steps=sac_cfg.get("gradient_steps", 32),
-        learning_starts=sac_cfg.get("learning_starts", 5_000),
-        policy_kwargs={"net_arch": sac_cfg.get("net_arch", [256, 256, 256])},
-        tensorboard_log=str(log_dir),
-        device=device,
-        seed=seed,
-        verbose=1,
-    )
+    if args.resume_model:
+        print(f"[IsaacExpert] Resuming model from: {args.resume_model}")
+        model = SAC.load(args.resume_model, env=vec_env, device=device)
+        if args.resume_replay_buffer:
+            print(f"[IsaacExpert] Loading replay buffer: {args.resume_replay_buffer}")
+            model.load_replay_buffer(args.resume_replay_buffer)
+    else:
+        model = SAC(
+            "MlpPolicy",
+            vec_env,
+            learning_rate=sac_cfg.get("learning_rate", 3e-4),
+            buffer_size=sac_cfg.get("buffer_size", 200_000),
+            batch_size=sac_cfg.get("batch_size", 512),
+            tau=sac_cfg.get("tau", 0.005),
+            gamma=sac_cfg.get("gamma", 0.99),
+            train_freq=sac_cfg.get("train_freq", 32),
+            gradient_steps=sac_cfg.get("gradient_steps", 32),
+            learning_starts=sac_cfg.get("learning_starts", 5_000),
+            policy_kwargs={"net_arch": sac_cfg.get("net_arch", [256, 256, 256])},
+            tensorboard_log=str(log_dir),
+            device=device,
+            seed=seed,
+            verbose=1,
+        )
 
     eval_cb = EvalCallback(
         eval_env,
@@ -190,11 +234,20 @@ def main() -> None:
         save_path=str(save_dir),
         name_prefix="isaac_expert_sac",
     )
+    wallclock_cb = WallClockCheckpointCallback(
+        save_dir=save_dir,
+        interval_seconds=training_cfg.get("checkpoint_every_seconds", 3600),
+    )
 
     total = training_cfg.get("total_timesteps", 500_000)
     print(f"[IsaacExpert] Training SAC for {total} timesteps …")
 
-    model.learn(total_timesteps=total, callback=[eval_cb, ckpt_cb], progress_bar=True)
+    model.learn(
+        total_timesteps=total,
+        callback=[eval_cb, ckpt_cb, wallclock_cb],
+        progress_bar=True,
+        reset_num_timesteps=not bool(args.resume_model),
+    )
 
     model.save(str(save_dir / "expert_sac"))
     vec_env.save(str(save_dir / "expert_vecnormalize.pkl"))
