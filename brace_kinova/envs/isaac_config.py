@@ -88,10 +88,14 @@ class IsaacBraceEnvConfig:
     gripper_close_pos: float = 1.2
 
     # Reward weights (same semantics as ExpertRewardConfig)
-    reward_progress_weight: float = 3.0
-    reward_heading_penalty: float = 0.8
-    reward_obstacle_penalty: float = 2.5
+    reward_progress_weight: float = 4.0
+    reward_heading_penalty: float = 0.6
+    reward_obstacle_penalty: float = 1.2
     reward_d_safe: float = 0.06
+    reward_near_goal_weight: float = 0.6
+    reward_near_goal_scale: float = 0.12
+    reward_time_penalty: float = 0.002
+    reward_stagnation_penalty: float = 0.01
     reward_goal_bonus: float = 5.0
     reward_collision_penalty: float = 10.0
 

@@ -10,6 +10,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import time
 from pathlib import Path
 
 import yaml
@@ -100,6 +101,7 @@ def main():
     parser = argparse.ArgumentParser(description="Pretrain Bayesian Inference")
     parser.add_argument("--config", type=str, default="brace_kinova/configs/belief.yaml")
     parser.add_argument("--device", type=str, default=None)
+    parser.add_argument("--resume_checkpoint", type=str, default=None)
     args = parser.parse_args()
 
     with open(args.config) as f:
@@ -140,6 +142,7 @@ def main():
     optimizer = optim.Adam(model.parameters(), lr=train_cfg.get("learning_rate", 5e-3))
     epochs = train_cfg.get("epochs", 200)
     batch_size = train_cfg.get("batch_size", 512)
+    checkpoint_every_seconds = int(train_cfg.get("checkpoint_every_seconds", 3600))
 
     t_ee = torch.from_numpy(ee_pos).to(device)
     t_actions = torch.from_numpy(h_actions).to(device)
@@ -148,9 +151,20 @@ def main():
 
     n_batches = (n_traj + batch_size - 1) // batch_size
 
-    print(f"[Belief] Training for {epochs} epochs, batch_size={batch_size}")
+    start_epoch = 0
+    if args.resume_checkpoint:
+        ckpt = torch.load(args.resume_checkpoint, map_location=device)
+        model.load_state_dict(ckpt["model_state_dict"])
+        optimizer.load_state_dict(ckpt["optimizer_state_dict"])
+        start_epoch = int(ckpt.get("epoch", 0))
+        print(f"[Belief] Resumed from {args.resume_checkpoint} at epoch {start_epoch}")
 
-    for epoch in range(epochs):
+    print(f"[Belief] Training for {epochs} epochs, batch_size={batch_size}, start_epoch={start_epoch}")
+    save_dir = Path(train_cfg.get("save_dir", "./checkpoints"))
+    save_dir.mkdir(parents=True, exist_ok=True)
+    next_wallclock_save = time.time() + checkpoint_every_seconds
+
+    for epoch in range(start_epoch, epochs):
         perm = torch.randperm(n_traj, device=device)
         epoch_loss = 0.0
 
@@ -193,9 +207,21 @@ def main():
                 f"beta={model.beta.item():.3f} w_th={model.w_theta.item():.3f} "
                 f"w_d={model.w_dist.item():.3f}"
             )
+        if time.time() >= next_wallclock_save:
+            stamp = time.strftime("%Y%m%d-%H%M%S", time.localtime())
+            ckpt_path = save_dir / f"bayesian_inference_time_{stamp}_epoch{epoch+1}.ckpt.pt"
+            torch.save(
+                {
+                    "epoch": epoch + 1,
+                    "model_state_dict": model.state_dict(),
+                    "optimizer_state_dict": optimizer.state_dict(),
+                    "config_path": args.config,
+                },
+                str(ckpt_path),
+            )
+            print(f"[Belief] Wall-clock checkpoint saved: {ckpt_path}")
+            next_wallclock_save = time.time() + checkpoint_every_seconds
 
-    save_dir = Path(train_cfg.get("save_dir", "./checkpoints"))
-    save_dir.mkdir(parents=True, exist_ok=True)
     save_path = Path(train_cfg.get("save_path", "checkpoints/bayesian_inference.pt"))
     save_path.parent.mkdir(parents=True, exist_ok=True)
 

@@ -431,7 +431,7 @@ class IsaacReachGraspEnv(gym.Env):
             reward = self.cfg.reward_goal_bonus
 
         if not terminated:
-            reward = self._compute_reward(vx, vy)
+            reward = self._compute_reward()
 
         if self._step_count >= self.cfg.max_steps:
             truncated = True
@@ -486,12 +486,21 @@ class IsaacReachGraspEnv(gym.Env):
     # Reward
     # ------------------------------------------------------------------
 
-    def _compute_reward(self, vx: float, vy: float) -> float:
+    def _compute_reward(self) -> float:
         d_goal = float(np.linalg.norm(self._ee_pos_xy - self.true_goal_position))
         d_max = max(self._initial_dist_to_goal, 1e-6)
 
-        heading = math.atan2(vy, vx) if (abs(vx) + abs(vy)) > 1e-6 else self._prev_heading
-        delta_heading = heading - self._prev_heading
+        # Use actual motion (post-IK + physics), not commanded action, for robust shaping.
+        move_vec = self._ee_pos_xy - self._prev_ee_pos_xy
+        move_norm = float(np.linalg.norm(move_vec))
+        to_goal = self.true_goal_position - self._prev_ee_pos_xy
+        goal_norm = float(np.linalg.norm(to_goal))
+        if move_norm > 1e-8 and goal_norm > 1e-8:
+            move_h = math.atan2(float(move_vec[1]), float(move_vec[0]))
+            goal_h = math.atan2(float(to_goal[1]), float(to_goal[0]))
+            heading_err = (move_h - goal_h + math.pi) % (2.0 * math.pi) - math.pi
+        else:
+            heading_err = 0.0
 
         if self.n_obstacles > 0:
             obs_dists = np.linalg.norm(
@@ -503,11 +512,14 @@ class IsaacReachGraspEnv(gym.Env):
 
         reward = (
             self.cfg.reward_progress_weight * (self._prev_dist_to_goal - d_goal) / d_max
-            - self.cfg.reward_heading_penalty * delta_heading ** 2
+            - self.cfg.reward_heading_penalty * heading_err ** 2
             - self.cfg.reward_obstacle_penalty * math.exp(-min_obs_dist / self.cfg.reward_d_safe)
+            + self.cfg.reward_near_goal_weight * math.exp(-d_goal / self.cfg.reward_near_goal_scale)
+            - self.cfg.reward_time_penalty
         )
+        if move_norm < 1e-4:
+            reward -= self.cfg.reward_stagnation_penalty
         self._prev_dist_to_goal = d_goal
-        self._prev_heading = heading
         return reward
 
     # ------------------------------------------------------------------

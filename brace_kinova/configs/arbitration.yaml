@@ -42,6 +42,7 @@ training:
   log_dir: ./logs/arbitration
   save_dir: ./checkpoints
   save_freq: 50000
+  checkpoint_every_seconds: 3600
   eval_freq: 10000
   eval_episodes: 50
   n_envs: 8

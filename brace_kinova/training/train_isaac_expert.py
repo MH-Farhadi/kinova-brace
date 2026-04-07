@@ -154,6 +154,10 @@ def main() -> None:
     env_config.reward_heading_penalty = reward_cfg.get("heading_penalty", 0.8)
     env_config.reward_obstacle_penalty = reward_cfg.get("obstacle_penalty", 2.5)
     env_config.reward_d_safe = reward_cfg.get("d_safe", 0.06)
+    env_config.reward_near_goal_weight = reward_cfg.get("near_goal_weight", 0.6)
+    env_config.reward_near_goal_scale = reward_cfg.get("near_goal_scale", 0.12)
+    env_config.reward_time_penalty = reward_cfg.get("time_penalty", 0.002)
+    env_config.reward_stagnation_penalty = reward_cfg.get("stagnation_penalty", 0.01)
     env_config.reward_goal_bonus = reward_cfg.get("goal_bonus", 5.0)
     env_config.reward_collision_penalty = reward_cfg.get("collision_penalty", 10.0)
 

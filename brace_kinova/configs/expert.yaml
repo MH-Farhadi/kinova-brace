@@ -24,6 +24,7 @@ training:
   log_dir: ./logs/expert
   save_dir: ./checkpoints
   save_freq: 50000
+  checkpoint_every_seconds: 3600
   eval_freq: 20000
   eval_episodes: 20
   n_envs: 4

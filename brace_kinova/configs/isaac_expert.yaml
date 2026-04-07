@@ -1,12 +1,12 @@
 sac:
-  learning_rate: 3.0e-4
+  learning_rate: 7.0e-4
   buffer_size: 200000
-  batch_size: 512
+  batch_size: 256
   tau: 0.005
   gamma: 0.99
   train_freq: 32
   gradient_steps: 32
-  learning_starts: 5000
+  learning_starts: 2000
   net_arch: [256, 256, 256]
 
 training:
@@ -20,10 +20,14 @@ training:
   n_envs: 1  # Single Isaac Sim instance
 
 reward:
-  progress_weight: 3.0
-  heading_penalty: 0.8
-  obstacle_penalty: 2.5
+  progress_weight: 4.0
+  heading_penalty: 0.6
+  obstacle_penalty: 1.2
   d_safe: 0.06
+  near_goal_weight: 0.6
+  near_goal_scale: 0.12
+  time_penalty: 0.002
+  stagnation_penalty: 0.01
   goal_bonus: 5.0
   collision_penalty: 10.0
 

@@ -15,35 +15,69 @@ This repository combines two related codebases for shared-autonomy research with
 pip install -r brace_kinova/requirements.txt
 ```
 
-### 2. Train on the lightweight 2D environment (no Isaac Sim needed)
+### 2. Train/Resume on lightweight 2D environment (no Isaac Sim needed)
 
 ```bash
-# Expert (SAC)
-python -m brace_kinova.training.train_expert --config brace_kinova/configs/expert.yaml
+# Expert (SAC) - start
+python -m brace_kinova.training.train_expert \
+  --config brace_kinova/configs/expert.yaml
 
-# Bayesian belief module
-python -m brace_kinova.training.train_belief --config brace_kinova/configs/belief.yaml
+# Expert (SAC) - resume from checkpoint (+ optional replay buffer)
+python -m brace_kinova.training.train_expert \
+  --config brace_kinova/configs/expert.yaml \
+  --resume_model checkpoints/expert_sac_time_<TIMESTAMP>_<STEPS>.zip \
+  --resume_replay_buffer checkpoints/expert_sac_time_<TIMESTAMP>_<STEPS>.replay_buffer.pkl
 
-# Arbitration (PPO + 5-stage curriculum)
-python -m brace_kinova.training.train_arbitration --config brace_kinova/configs/arbitration.yaml
+# Belief pretraining - start
+python -m brace_kinova.training.train_belief \
+  --config brace_kinova/configs/belief.yaml
+
+# Belief pretraining - resume
+python -m brace_kinova.training.train_belief \
+  --config brace_kinova/configs/belief.yaml \
+  --resume_checkpoint checkpoints/bayesian_inference_time_<TIMESTAMP>_epoch<NUM>.ckpt.pt
+
+# Arbitration (PPO + curriculum) - start
+python -m brace_kinova.training.train_arbitration \
+  --config brace_kinova/configs/arbitration.yaml
+
+# Arbitration (PPO + curriculum) - resume policy
+python -m brace_kinova.training.train_arbitration \
+  --config brace_kinova/configs/arbitration.yaml \
+  --resume_model checkpoints/arbitration_policy_time_<TIMESTAMP>_<STEPS>.zip
 ```
 
-### 3. Train on Isaac Sim with the Kinova Jaco2
+### 3. Train/Resume on Isaac Sim with the Kinova Jaco2
 
-Requires Isaac Sim 4.5+ and Isaac Lab.  Run via the Isaac Lab launcher:
+Requires Isaac Sim 4.5+ and Isaac Lab. Run via the Isaac Lab launcher (replace path as needed):
 
 ```bash
-# Expert (SAC) — Kinova Jaco2 in Isaac Sim
-isaaclab -p -m brace_kinova.training.train_isaac_expert \
-    --config brace_kinova/configs/isaac_expert.yaml --headless
+# Expert (SAC) - start
+/home/kye/IsaacLab/isaaclab.sh -p -m brace_kinova.training.train_isaac_expert \
+  --config brace_kinova/configs/isaac_expert.yaml
 
-# Belief — same as above (uses synthetic data, no sim needed)
-python -m brace_kinova.training.train_belief --config brace_kinova/configs/belief.yaml
+# Expert (SAC) - resume from checkpoint (+ optional replay buffer)
+/home/kye/IsaacLab/isaaclab.sh -p -m brace_kinova.training.train_isaac_expert \
+  --config brace_kinova/configs/isaac_expert.yaml \
+  --resume_model checkpoints/isaac_expert_sac_time_<TIMESTAMP>_<STEPS>.zip \
+  --resume_replay_buffer checkpoints/isaac_expert_sac_time_<TIMESTAMP>_<STEPS>.replay_buffer.pkl
 
-# Arbitration (PPO + curriculum) — Kinova Jaco2 in Isaac Sim
-isaaclab -p -m brace_kinova.training.train_isaac_arbitration \
-    --config brace_kinova/configs/isaac_arbitration.yaml --headless
+# Belief pretraining (same synthetic data pipeline)
+python -m brace_kinova.training.train_belief \
+  --config brace_kinova/configs/belief.yaml
+
+# Isaac arbitration - start
+/home/kye/IsaacLab/isaaclab.sh -p -m brace_kinova.training.train_isaac_arbitration \
+  --config brace_kinova/configs/isaac_arbitration.yaml
+
+# Isaac arbitration - resume policy
+/home/kye/IsaacLab/isaaclab.sh -p -m brace_kinova.training.train_isaac_arbitration \
+  --config brace_kinova/configs/isaac_arbitration.yaml \
+  --resume_model checkpoints/isaac_arbitration_policy_time_<TIMESTAMP>_<STEPS>.zip
 ```
+
+All training scripts now support hourly wall-clock checkpoints via:
+- `training.checkpoint_every_seconds` in YAML configs (default `3600`)
 
 ### 4. Monitor training
 

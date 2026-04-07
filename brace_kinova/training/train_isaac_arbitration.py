@@ -15,6 +15,7 @@ Usage (from repo root, inside the Isaac Lab Python environment)::
 from __future__ import annotations
 
 import argparse
+import time
 from pathlib import Path
 
 # --- AppLauncher MUST run first -------------------------------------------
@@ -23,6 +24,7 @@ from isaaclab.app import AppLauncher
 parser = argparse.ArgumentParser(description="BRACE Arbitration (Isaac Sim)")
 AppLauncher.add_app_launcher_args(parser)
 parser.add_argument("--config", type=str, default="brace_kinova/configs/isaac_arbitration.yaml")
+parser.add_argument("--resume_model", type=str, default=None)
 # Note: --device is registered by AppLauncher. Do not add a second --device.
 args = parser.parse_args()
 
@@ -41,7 +43,7 @@ from gymnasium import spaces
 from stable_baselines3 import PPO
 from stable_baselines3.common.vec_env import DummyVecEnv
 from stable_baselines3.common.monitor import Monitor
-from stable_baselines3.common.callbacks import CallbackList
+from stable_baselines3.common.callbacks import CallbackList, BaseCallback
 
 import isaaclab.sim as sim_utils
 
@@ -62,6 +64,34 @@ from brace_kinova.training.callbacks import (
     CheckpointCallback,
 )
 from brace_kinova.training.train_isaac_expert import build_env_config
+
+
+class WallClockArbitrationCheckpointCallback(BaseCallback):
+    """Save PPO policy + belief module every N wall-clock seconds."""
+
+    def __init__(self, save_dir: Path, belief_module, interval_seconds: int = 3600, verbose: int = 1):
+        super().__init__(verbose=verbose)
+        self.save_dir = save_dir
+        self.belief_module = belief_module
+        self.interval_seconds = int(interval_seconds)
+        self._last_save_time = time.time()
+
+    def _on_step(self) -> bool:
+        now = time.time()
+        if now - self._last_save_time < self.interval_seconds:
+            return True
+        self.save_dir.mkdir(parents=True, exist_ok=True)
+        stamp = time.strftime("%Y%m%d-%H%M%S", time.localtime(now))
+        step = int(self.num_timesteps)
+        policy_path = self.save_dir / f"isaac_arbitration_policy_time_{stamp}_{step}.zip"
+        belief_path = self.save_dir / f"isaac_bayesian_inference_time_{stamp}_{step}.pt"
+        self.model.save(str(policy_path))
+        if self.belief_module is not None:
+            torch.save(self.belief_module.state_dict(), str(belief_path))
+        self._last_save_time = now
+        if self.verbose:
+            print(f"[IsaacArbitration] Wall-clock checkpoint saved: {policy_path.name}")
+        return True
 
 
 # --------------------------------------------------------------------------
@@ -319,22 +349,26 @@ def main() -> None:
         "activation_fn": torch.nn.ReLU,
     }
 
-    model = PPO(
-        GammaArbitrationPolicy,
-        vec_env,
-        learning_rate=ppo_cfg.get("learning_rate", 3e-4),
-        n_steps=ppo_cfg.get("n_steps", 512),
-        batch_size=ppo_cfg.get("batch_size", 512),
-        n_epochs=ppo_cfg.get("n_epochs", 4),
-        gamma=ppo_cfg.get("gamma", 0.99),
-        gae_lambda=ppo_cfg.get("gae_lambda", 0.95),
-        clip_range=ppo_cfg.get("clip_range", 0.2),
-        policy_kwargs=policy_kwargs,
-        tensorboard_log=str(log_dir),
-        device=device,
-        seed=seed,
-        verbose=1,
-    )
+    if args.resume_model:
+        print(f"[IsaacArbitration] Resuming policy from: {args.resume_model}")
+        model = PPO.load(args.resume_model, env=vec_env, device=device)
+    else:
+        model = PPO(
+            GammaArbitrationPolicy,
+            vec_env,
+            learning_rate=ppo_cfg.get("learning_rate", 3e-4),
+            n_steps=ppo_cfg.get("n_steps", 512),
+            batch_size=ppo_cfg.get("batch_size", 512),
+            n_epochs=ppo_cfg.get("n_epochs", 4),
+            gamma=ppo_cfg.get("gamma", 0.99),
+            gae_lambda=ppo_cfg.get("gae_lambda", 0.95),
+            clip_range=ppo_cfg.get("clip_range", 0.2),
+            policy_kwargs=policy_kwargs,
+            tensorboard_log=str(log_dir),
+            device=device,
+            seed=seed,
+            verbose=1,
+        )
 
     # Curriculum callback that actually reconfigures the wrapped env
     inner_env: BraceIsaacArbitrationEnv = vec_env.envs[0].env  # type: ignore[attr-defined]
@@ -350,13 +384,23 @@ def main() -> None:
             save_dir=str(save_dir),
             belief_module=belief_module,
         ),
+        WallClockArbitrationCheckpointCallback(
+            save_dir=save_dir,
+            belief_module=belief_module,
+            interval_seconds=train_cfg.get("checkpoint_every_seconds", 3600),
+        ),
     ])
 
     total = train_cfg.get("total_timesteps", 1_000_000)
     print(f"[IsaacArbitration] Training PPO for {total} timesteps …")
     print(f"[IsaacArbitration] Starting stage: {curriculum.current_stage.name}")
 
-    model.learn(total_timesteps=total, callback=callbacks, progress_bar=True)
+    model.learn(
+        total_timesteps=total,
+        callback=callbacks,
+        progress_bar=True,
+        reset_num_timesteps=not bool(args.resume_model),
+    )
 
     model.save(str(save_dir / "arbitration_policy"))
     torch.save(belief_module.state_dict(), str(save_dir / "bayesian_inference_finetuned.pt"))

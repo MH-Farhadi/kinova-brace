@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import argparse
 import math
+import time
 from pathlib import Path
 from collections import deque
 
@@ -27,6 +28,7 @@ from stable_baselines3 import PPO
 from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv, VecMonitor
 from stable_baselines3.common.monitor import Monitor
 from stable_baselines3.common.callbacks import CallbackList
+from stable_baselines3.common.callbacks import BaseCallback
 
 from brace_kinova.envs.reach_grasp_env import ReachGraspEnv
 from brace_kinova.models.bayesian_inference import BayesianGoalInference
@@ -46,6 +48,35 @@ def resolve_device(device_str: str) -> str:
     if device_str == "auto":
         return "cuda" if torch.cuda.is_available() else "cpu"
     return device_str
+
+
+class WallClockArbitrationCheckpointCallback(BaseCallback):
+    """Save PPO policy + belief module every N wall-clock seconds."""
+
+    def __init__(self, save_dir: Path, belief_module, interval_seconds: int = 3600, verbose: int = 1):
+        super().__init__(verbose=verbose)
+        self.save_dir = save_dir
+        self.belief_module = belief_module
+        self.interval_seconds = int(interval_seconds)
+        self._last_save_time = time.time()
+
+    def _on_step(self) -> bool:
+        now = time.time()
+        if now - self._last_save_time < self.interval_seconds:
+            return True
+
+        self.save_dir.mkdir(parents=True, exist_ok=True)
+        stamp = time.strftime("%Y%m%d-%H%M%S", time.localtime(now))
+        step = int(self.num_timesteps)
+        policy_path = self.save_dir / f"arbitration_policy_time_{stamp}_{step}.zip"
+        belief_path = self.save_dir / f"bayesian_inference_time_{stamp}_{step}.pt"
+        self.model.save(str(policy_path))
+        if self.belief_module is not None:
+            torch.save(self.belief_module.state_dict(), str(belief_path))
+        self._last_save_time = now
+        if self.verbose:
+            print(f"[Arbitration] Wall-clock checkpoint saved: {policy_path.name}")
+        return True
 
 
 class BraceArbitrationEnv(ReachGraspEnv):
@@ -255,6 +286,7 @@ def main():
     parser = argparse.ArgumentParser(description="Train BRACE Arbitration (PPO + Belief)")
     parser.add_argument("--config", type=str, default="brace_kinova/configs/arbitration.yaml")
     parser.add_argument("--device", type=str, default=None)
+    parser.add_argument("--resume_model", type=str, default=None)
     args = parser.parse_args()
 
     with open(args.config) as f:
@@ -341,22 +373,26 @@ def main():
         "activation_fn": torch.nn.ReLU,
     }
 
-    model = PPO(
-        GammaArbitrationPolicy,
-        vec_env,
-        learning_rate=ppo_cfg.get("learning_rate", 3e-4),
-        n_steps=ppo_cfg.get("n_steps", 1024),
-        batch_size=ppo_cfg.get("batch_size", 1024),
-        n_epochs=ppo_cfg.get("n_epochs", 4),
-        gamma=ppo_cfg.get("gamma", 0.99),
-        gae_lambda=ppo_cfg.get("gae_lambda", 0.95),
-        clip_range=ppo_cfg.get("clip_range", 0.2),
-        policy_kwargs=policy_kwargs,
-        tensorboard_log=str(log_dir),
-        device=device,
-        seed=seed,
-        verbose=1,
-    )
+    if args.resume_model:
+        print(f"[Arbitration] Resuming policy from: {args.resume_model}")
+        model = PPO.load(args.resume_model, env=vec_env, device=device)
+    else:
+        model = PPO(
+            GammaArbitrationPolicy,
+            vec_env,
+            learning_rate=ppo_cfg.get("learning_rate", 3e-4),
+            n_steps=ppo_cfg.get("n_steps", 1024),
+            batch_size=ppo_cfg.get("batch_size", 1024),
+            n_epochs=ppo_cfg.get("n_epochs", 4),
+            gamma=ppo_cfg.get("gamma", 0.99),
+            gae_lambda=ppo_cfg.get("gae_lambda", 0.95),
+            clip_range=ppo_cfg.get("clip_range", 0.2),
+            policy_kwargs=policy_kwargs,
+            tensorboard_log=str(log_dir),
+            device=device,
+            seed=seed,
+            verbose=1,
+        )
 
     def update_env_scenario(scenario_config):
         """Reconfigure all sub-environments to the new curriculum scenario."""
@@ -375,6 +411,11 @@ def main():
             save_dir=str(save_dir),
             belief_module=belief_module,
         ),
+        WallClockArbitrationCheckpointCallback(
+            save_dir=save_dir,
+            belief_module=belief_module,
+            interval_seconds=train_cfg.get("checkpoint_every_seconds", 3600),
+        ),
     ])
 
     belief_optimizer = optim.Adam(
@@ -391,6 +432,7 @@ def main():
         total_timesteps=total_timesteps,
         callback=callbacks,
         progress_bar=True,
+        reset_num_timesteps=not bool(args.resume_model),
     )
 
     final_policy_path = save_dir / "arbitration_policy"

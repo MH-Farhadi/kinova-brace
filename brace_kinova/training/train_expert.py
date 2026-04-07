@@ -7,6 +7,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import time
 from pathlib import Path
 
 import yaml
@@ -14,11 +15,44 @@ import torch
 import numpy as np
 from stable_baselines3 import SAC
 from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv, VecNormalize
-from stable_baselines3.common.callbacks import EvalCallback, CheckpointCallback
+from stable_baselines3.common.callbacks import EvalCallback, CheckpointCallback, BaseCallback
 from stable_baselines3.common.monitor import Monitor
 
 from brace_kinova.envs.reach_grasp_env import ExpertReachGraspEnv
 from brace_kinova.envs.scenarios import SCENARIOS
+
+
+class WallClockCheckpointCallback(BaseCallback):
+    """Save model/replay-buffer/VecNormalize state every N seconds."""
+
+    def __init__(self, save_dir: Path, interval_seconds: int = 3600, verbose: int = 1):
+        super().__init__(verbose=verbose)
+        self.save_dir = save_dir
+        self.interval_seconds = int(interval_seconds)
+        self._last_save_time = time.time()
+
+    def _on_step(self) -> bool:
+        now = time.time()
+        if now - self._last_save_time < self.interval_seconds:
+            return True
+
+        self.save_dir.mkdir(parents=True, exist_ok=True)
+        stamp = time.strftime("%Y%m%d-%H%M%S", time.localtime(now))
+        step = int(self.num_timesteps)
+        model_path = self.save_dir / f"expert_sac_time_{stamp}_{step}.zip"
+        replay_path = self.save_dir / f"expert_sac_time_{stamp}_{step}.replay_buffer.pkl"
+        norm_path = self.save_dir / f"expert_sac_time_{stamp}_{step}.vecnormalize.pkl"
+
+        self.model.save(str(model_path))
+        self.model.save_replay_buffer(str(replay_path))
+        env = self.model.get_env()
+        if env is not None:
+            env.save(str(norm_path))
+
+        self._last_save_time = now
+        if self.verbose:
+            print(f"[Expert] Wall-clock checkpoint saved: {model_path.name}")
+        return True
 
 
 def make_env(env_cfg: dict, scenario: str = "basic_reaching", seed: int = 0):
@@ -48,6 +82,8 @@ def main():
     parser = argparse.ArgumentParser(description="Train SAC expert for BRACE")
     parser.add_argument("--config", type=str, default="brace_kinova/configs/expert.yaml")
     parser.add_argument("--device", type=str, default=None)
+    parser.add_argument("--resume_model", type=str, default=None)
+    parser.add_argument("--resume_replay_buffer", type=str, default=None)
     args = parser.parse_args()
 
     with open(args.config) as f:
@@ -101,23 +137,30 @@ def main():
     save_dir.mkdir(parents=True, exist_ok=True)
     log_dir.mkdir(parents=True, exist_ok=True)
 
-    model = SAC(
-        "MlpPolicy",
-        vec_env,
-        learning_rate=sac_cfg.get("learning_rate", 3e-4),
-        buffer_size=sac_cfg.get("buffer_size", 400_000),
-        batch_size=sac_cfg.get("batch_size", 1024),
-        tau=sac_cfg.get("tau", 0.005),
-        gamma=sac_cfg.get("gamma", 0.99),
-        train_freq=sac_cfg.get("train_freq", 64),
-        gradient_steps=sac_cfg.get("gradient_steps", 64),
-        learning_starts=sac_cfg.get("learning_starts", 10_000),
-        policy_kwargs={"net_arch": sac_cfg.get("net_arch", [256, 256, 256])},
-        tensorboard_log=str(log_dir),
-        device=device,
-        seed=seed,
-        verbose=1,
-    )
+    if args.resume_model:
+        print(f"[Expert] Resuming model from: {args.resume_model}")
+        model = SAC.load(args.resume_model, env=vec_env, device=device)
+        if args.resume_replay_buffer:
+            print(f"[Expert] Loading replay buffer: {args.resume_replay_buffer}")
+            model.load_replay_buffer(args.resume_replay_buffer)
+    else:
+        model = SAC(
+            "MlpPolicy",
+            vec_env,
+            learning_rate=sac_cfg.get("learning_rate", 3e-4),
+            buffer_size=sac_cfg.get("buffer_size", 400_000),
+            batch_size=sac_cfg.get("batch_size", 1024),
+            tau=sac_cfg.get("tau", 0.005),
+            gamma=sac_cfg.get("gamma", 0.99),
+            train_freq=sac_cfg.get("train_freq", 64),
+            gradient_steps=sac_cfg.get("gradient_steps", 64),
+            learning_starts=sac_cfg.get("learning_starts", 10_000),
+            policy_kwargs={"net_arch": sac_cfg.get("net_arch", [256, 256, 256])},
+            tensorboard_log=str(log_dir),
+            device=device,
+            seed=seed,
+            verbose=1,
+        )
 
     eval_callback = EvalCallback(
         eval_env,
@@ -133,14 +176,19 @@ def main():
         save_path=str(save_dir),
         name_prefix="expert_sac",
     )
+    wallclock_callback = WallClockCheckpointCallback(
+        save_dir=save_dir,
+        interval_seconds=training_cfg.get("checkpoint_every_seconds", 3600),
+    )
 
     total_timesteps = training_cfg.get("total_timesteps", 1_000_000)
     print(f"[Expert] Training SAC for {total_timesteps} timesteps...")
 
     model.learn(
         total_timesteps=total_timesteps,
-        callback=[eval_callback, checkpoint_callback],
+        callback=[eval_callback, checkpoint_callback, wallclock_callback],
         progress_bar=True,
+        reset_num_timesteps=not bool(args.resume_model),
     )
 
     final_path = save_dir / "expert_sac"

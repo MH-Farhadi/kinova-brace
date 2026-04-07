@@ -11,6 +11,7 @@ training:
   batch_size: 512
   n_trajectories: 5000
   trajectory_length: 100
+  checkpoint_every_seconds: 3600
   log_dir: ./logs/belief
   save_dir: ./checkpoints
   save_path: checkpoints/bayesian_inference.pt

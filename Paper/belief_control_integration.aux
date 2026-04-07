@@ -1,0 +1,49 @@
+\relax 
+\providecommand\hyper@newdestlabel[2]{}
+\providecommand\HyField@AuxAddToFields[1]{}
+\providecommand\HyField@AuxAddToCoFields[2]{}
+\@writefile{toc}{\contentsline {section}{\numberline {1}Overview}{1}{section.1}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {2}How Belief Is Incorporated into Action Selection}{1}{section.2}\protected@file@percent }
+\newlabel{sec:belief-to-action}{{2}{1}{How Belief Is Incorporated into Action Selection}{section.2}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {2.1}Pathway 1: Arbitration Policy Input}{2}{subsection.2.1}\protected@file@percent }
+\newlabel{eq:fused-obs}{{1}{2}{Pathway 1: Arbitration Policy Input}{equation.1}{}}
+\newlabel{eq:gamma-map}{{2}{2}{Pathway 1: Arbitration Policy Input}{equation.2}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {2.2}Pathway 2: Expert Goal Selection at Deployment}{2}{subsection.2.2}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {2.3}Final Blended Action}{2}{subsection.2.3}\protected@file@percent }
+\newlabel{eq:blend}{{4}{2}{Final Blended Action}{equation.4}{}}
+\@writefile{toc}{\contentsline {section}{\numberline {3}Training Data Collection and Distribution}{3}{section.3}\protected@file@percent }
+\newlabel{sec:training-data}{{3}{3}{Training Data Collection and Distribution}{section.3}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {3.1}Stage 1: Belief Module Pretraining (Supervised)}{3}{subsection.3.1}\protected@file@percent }
+\newlabel{eq:sup-loss}{{5}{3}{Stage 1: Belief Module Pretraining (Supervised)}{equation.5}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {3.2}Stage 2: Joint Arbitration Training (RL + Belief Fine-tuning)}{3}{subsection.3.2}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {3.3}End-to-End Gradient Flow for Belief Fine-tuning}{4}{subsection.3.3}\protected@file@percent }
+\newlabel{eq:mixed-obj}{{6}{4}{End-to-End Gradient Flow for Belief Fine-tuning}{equation.6}{}}
+\newlabel{eq:reinforce}{{7}{4}{End-to-End Gradient Flow for Belief Fine-tuning}{equation.7}{}}
+\@writefile{toc}{\contentsline {section}{\numberline {4}Component Integration}{5}{section.4}\protected@file@percent }
+\newlabel{sec:integration}{{4}{5}{Component Integration}{section.4}{}}
+\@writefile{lot}{\contentsline {table}{\numberline {1}{\ignorespaces BRACE component specification}}{5}{table.1}\protected@file@percent }
+\newlabel{tab:components}{{1}{5}{BRACE component specification}{table.1}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {4.1}Observation Space Construction}{5}{subsection.4.1}\protected@file@percent }
+\newlabel{eq:obs-full}{{8}{5}{Observation Space Construction}{equation.8}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {4.2}Arbitration Reward Function}{6}{subsection.4.2}\protected@file@percent }
+\newlabel{eq:reward}{{9}{6}{Arbitration Reward Function}{equation.9}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {4.3}Curriculum Progression}{6}{subsection.4.3}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {5}Per-Timestep Data Flow}{6}{section.5}\protected@file@percent }
+\newlabel{sec:dataflow}{{5}{6}{Per-Timestep Data Flow}{section.5}{}}
+\@writefile{loa}{\contentsline {algorithm}{\numberline {1}{\ignorespaces BRACE: single-timestep execution during arbitration training}}{7}{algorithm.1}\protected@file@percent }
+\newlabel{alg:brace-step}{{1}{7}{Per-Timestep Data Flow}{algorithm.1}{}}
+\@writefile{toc}{\contentsline {section}{\numberline {6}Deployment Data Flow}{7}{section.6}\protected@file@percent }
+\newlabel{sec:deployment}{{6}{7}{Deployment Data Flow}{section.6}{}}
+\@writefile{toc}{\contentsline {section}{\numberline {7}Addressing Specific Reviewer Questions}{8}{section.7}\protected@file@percent }
+\newlabel{sec:reviewer-questions}{{7}{8}{Addressing Specific Reviewer Questions}{section.7}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {7.1}R3: How are ``raw goal probabilities'' used to compute the expert action?}{8}{subsection.7.1}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {7.2}R3: How is training data collected for arbitration? Does it reflect closed-loop coupling?}{8}{subsection.7.2}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {7.3}R3: What behavior distribution does the belief model see during pretraining vs.\ joint training?}{8}{subsection.7.3}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {7.4}R1: Connection between figures and methodology text}{9}{subsection.7.4}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {8}Proposed Revised Architecture Diagram}{9}{section.8}\protected@file@percent }
+\newlabel{sec:figure}{{8}{9}{Proposed Revised Architecture Diagram}{section.8}{}}
+\@writefile{lof}{\contentsline {figure}{\numberline {1}{\ignorespaces BRACE data flow at each timestep. Solid arrows: forward data flow. Dashed arrow: gradient flow from RL objective back to belief module (Stage~2 only). The expert receives the true goal during training (oracle) and the MAP goal at deployment. The belief vector $\mathbf  {b}_t$ is concatenated with the state $\mathbf  {s}_t$ to form the arbitration policy's observation.}}{9}{figure.1}\protected@file@percent }
+\newlabel{fig:brace-dataflow}{{1}{9}{BRACE data flow at each timestep. Solid arrows: forward data flow. Dashed arrow: gradient flow from RL objective back to belief module (Stage~2 only). The expert receives the true goal during training (oracle) and the MAP goal at deployment. The belief vector $\bvec $ is concatenated with the state $\svec $ to form the arbitration policy's observation}{figure.1}{}}
+\@writefile{toc}{\contentsline {section}{\numberline {9}Summary of Changes for Revised Manuscript}{9}{section.9}\protected@file@percent }
+\newlabel{sec:changes}{{9}{9}{Summary of Changes for Revised Manuscript}{section.9}{}}
+\gdef \@abspage@last{10}

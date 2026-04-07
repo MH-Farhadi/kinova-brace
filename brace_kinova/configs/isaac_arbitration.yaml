@@ -36,6 +36,7 @@ training:
   log_dir: ./logs/isaac_arbitration
   save_dir: ./checkpoints
   save_freq: 25000
+  checkpoint_every_seconds: 3600
   n_envs: 1
 
 human_model:
