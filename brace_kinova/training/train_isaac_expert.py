@@ -243,15 +243,27 @@ def main() -> None:
         interval_seconds=training_cfg.get("checkpoint_every_seconds", 3600),
     )
 
-    total = training_cfg.get("total_timesteps", 500_000)
-    print(f"[IsaacExpert] Training SAC for {total} timesteps …")
+    total_target = int(training_cfg.get("total_timesteps", 500_000))
+    current_steps = int(getattr(model, "num_timesteps", 0))
+    if args.resume_model:
+        remaining_steps = max(0, total_target - current_steps)
+        print(
+            f"[IsaacExpert] Resume mode: current={current_steps}, "
+            f"target={total_target}, remaining={remaining_steps}"
+        )
+    else:
+        remaining_steps = total_target
+        print(f"[IsaacExpert] Fresh run: target={total_target} timesteps")
 
-    model.learn(
-        total_timesteps=total,
-        callback=[eval_cb, ckpt_cb, wallclock_cb],
-        progress_bar=True,
-        reset_num_timesteps=not bool(args.resume_model),
-    )
+    if remaining_steps > 0:
+        model.learn(
+            total_timesteps=remaining_steps,
+            callback=[eval_cb, ckpt_cb, wallclock_cb],
+            progress_bar=True,
+            reset_num_timesteps=not bool(args.resume_model),
+        )
+    else:
+        print("[IsaacExpert] Target already reached. Skipping training.")
 
     model.save(str(save_dir / "expert_sac"))
     vec_env.save(str(save_dir / "expert_vecnormalize.pkl"))
